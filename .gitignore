@@ -1,0 +1,16 @@
+# Binaries and test artifacts
+*.exe
+*.test
+*.out
+coverage.*
+/bin/
+/dist/
+
+# Editor and OS files
+.idea/
+.vscode/
+.DS_Store
+
+# Local environment files must never be committed
+.env
+.env.*
