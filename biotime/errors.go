@@ -4,14 +4,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
-	"sort"
+	"slices"
 	"strings"
 )
 
 // Sentinel errors that can be matched with [errors.Is] against an [*Error].
 var (
-	// ErrUnauthorized is matched when the server answered 401 or 403.
+	// ErrUnauthorized is matched when the server answered 401 or 403, and
+	// when a login attempt was rejected.
 	ErrUnauthorized = errors.New("biotime: unauthorized")
 	// ErrNotFound is matched when the server answered 404.
 	ErrNotFound = errors.New("biotime: not found")
@@ -38,6 +40,11 @@ type Error struct {
 	Fields map[string][]string
 	// Body is the raw response body.
 	Body []byte
+
+	// login marks the failure of a login attempt, which the server reports
+	// as a 400 validation error but which callers reasonably treat as
+	// "unauthorized".
+	login bool
 }
 
 // Error implements the error interface.
@@ -52,11 +59,7 @@ func (e *Error) Error() string {
 		b.WriteString(e.Message)
 	}
 	if len(e.Fields) > 0 {
-		keys := make([]string, 0, len(e.Fields))
-		for k := range e.Fields {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
+		keys := slices.Sorted(maps.Keys(e.Fields))
 		parts := make([]string, 0, len(keys))
 		for _, k := range keys {
 			parts = append(parts, k+": "+strings.Join(e.Fields[k], "; "))
@@ -71,7 +74,7 @@ func (e *Error) Error() string {
 func (e *Error) Is(target error) bool {
 	switch target {
 	case ErrUnauthorized:
-		return e.StatusCode == http.StatusUnauthorized || e.StatusCode == http.StatusForbidden
+		return e.login || e.StatusCode == http.StatusUnauthorized || e.StatusCode == http.StatusForbidden
 	case ErrNotFound:
 		return e.StatusCode == http.StatusNotFound
 	case ErrValidation:
@@ -143,7 +146,7 @@ func stringList(raw json.RawMessage) []string {
 				out = append(out, k+": "+m)
 			}
 		}
-		sort.Strings(out)
+		slices.Sort(out)
 		return out
 	}
 	return nil

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -18,34 +19,27 @@ const (
 )
 
 // location is the zone applied when decoding naive timestamps and when
-// formatting time filters. Decoding happens in [json.Unmarshaler]
-// implementations that have no access to a client, so the setting is
-// package wide. See [SetLocation].
-var (
-	locationMu sync.RWMutex
-	location   = time.Local
-)
+// encoding them, in filters and in request bodies alike. Decoding happens in
+// [json.Unmarshaler] implementations that have no access to a client, so the
+// setting is package wide. See [SetLocation]. A nil value means [time.Local].
+var location atomic.Pointer[time.Location]
 
 // Location returns the zone used to interpret the server's naive timestamps.
 // The default is [time.Local].
 func Location() *time.Location {
-	locationMu.RLock()
-	defer locationMu.RUnlock()
-	return location
+	if l := location.Load(); l != nil {
+		return l
+	}
+	return time.Local
 }
 
 // SetLocation sets the zone used to interpret the naive (zone-less)
-// timestamps the server returns and to format time filters. ZKBio Time stores
-// wall-clock times without zone information, so this should match the
-// server's zone. Passing nil restores [time.Local].
-func SetLocation(loc *time.Location) {
-	if loc == nil {
-		loc = time.Local
-	}
-	locationMu.Lock()
-	defer locationMu.Unlock()
-	location = loc
-}
+// timestamps the server returns and to format the ones the client sends.
+// ZKBio Time stores wall-clock times without zone information, so this must
+// match the server's zone; the default of [time.Local] is wrong whenever the
+// program runs in a different zone than the server, which is the norm in
+// containers. Passing nil restores [time.Local].
+func SetLocation(loc *time.Location) { location.Store(loc) }
 
 // dateTimeLayouts lists the timestamp formats observed across server
 // generations, most common first.
@@ -60,8 +54,9 @@ var dateTimeLayouts = []string{
 }
 
 // DateTime is a timestamp encoded as "2006-01-02 15:04:05" in the server's
-// local zone. A JSON null or empty string decodes to the zero value, and the
-// zero value encodes as null.
+// zone (see [Location]); the instant is converted to that zone on encoding.
+// A JSON null or empty string decodes to the zero value, and the zero value
+// encodes as null.
 type DateTime struct {
 	time.Time
 }
@@ -69,12 +64,13 @@ type DateTime struct {
 // NewDateTime wraps t.
 func NewDateTime(t time.Time) DateTime { return DateTime{Time: t} }
 
-// String formats the value with [DateTimeLayout].
+// String formats the value with [DateTimeLayout] in the zone returned by
+// [Location].
 func (d DateTime) String() string {
 	if d.IsZero() {
 		return ""
 	}
-	return d.Format(DateTimeLayout)
+	return d.In(Location()).Format(DateTimeLayout)
 }
 
 // MarshalJSON implements [json.Marshaler].
@@ -105,14 +101,18 @@ func (d *DateTime) UnmarshalJSON(b []byte) error {
 
 // Date is a calendar date encoded as "2006-01-02". A JSON null or empty
 // string decodes to the zero value, and the zero value encodes as null.
+// Construct values with [NewDate] so that the date is taken in the server's
+// zone.
 type Date struct {
 	time.Time
 }
 
-// NewDate returns the date part of t in t's zone.
+// NewDate returns the calendar date of the instant t in the zone returned by
+// [Location], which is the date the server would record for it.
 func NewDate(t time.Time) Date {
-	y, m, d := t.Date()
-	return Date{Time: time.Date(y, m, d, 0, 0, 0, 0, t.Location())}
+	loc := Location()
+	y, m, d := t.In(loc).Date()
+	return Date{Time: time.Date(y, m, d, 0, 0, 0, 0, loc)}
 }
 
 // String formats the value with [DateLayout].

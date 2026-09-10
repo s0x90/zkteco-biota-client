@@ -18,6 +18,7 @@ import (
 const (
 	defaultTimeout   = 30 * time.Second
 	defaultUserAgent = "zkteco-biotime-go-client"
+	defaultMaxBody   = 32 << 20
 )
 
 // Client talks to a ZKBio Time server. Create one with [New]. A Client is
@@ -26,6 +27,7 @@ type Client struct {
 	baseURL       *url.URL
 	http          *http.Client
 	timeout       time.Duration
+	maxBody       int64
 	version       Version
 	pageSizeParam string
 	scheme        AuthScheme
@@ -73,28 +75,41 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 	}
 
 	c := &Client{
-		baseURL:       u,
-		timeout:       defaultTimeout,
-		version:       Version9,
-		pageSizeParam: Version9.pageSizeParam(),
-		scheme:        AuthToken,
-		userAgent:     defaultUserAgent,
+		baseURL:   u,
+		timeout:   defaultTimeout,
+		maxBody:   defaultMaxBody,
+		version:   Version9,
+		scheme:    AuthToken,
+		userAgent: defaultUserAgent,
 	}
 	for _, opt := range opts {
 		if err := opt(c); err != nil {
 			return nil, err
 		}
 	}
+	// Derived settings are resolved after every option ran, so option order
+	// does not matter.
+	if c.pageSizeParam == "" {
+		c.pageSizeParam = c.version.pageSizeParam()
+	}
 	if c.http == nil {
-		c.http = &http.Client{Timeout: c.timeout}
+		c.http = &http.Client{
+			Timeout: c.timeout,
+			// A followed redirect turns POST into GET and drops the body, and
+			// the response of the wrong endpoint would then be decoded without
+			// complaint. Surface the 3xx instead; request maps it to an *Error.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
 	}
 
-	c.Employees = &EmployeeService{c: c}
-	c.Departments = &DepartmentService{c: c}
-	c.Areas = &AreaService{c: c}
-	c.Positions = &PositionService{c: c}
-	c.Terminals = &TerminalService{c: c}
-	c.Transactions = &TransactionService{c: c}
+	c.Employees = &EmployeeService{resource: newResource[Employee, EmployeeParams, *EmployeeFilter](c, employeesPath)}
+	c.Departments = &DepartmentService{resource: newResource[Department, DepartmentParams, *DepartmentFilter](c, departmentsPath)}
+	c.Areas = &AreaService{resource: newResource[Area, AreaParams, *AreaFilter](c, areasPath)}
+	c.Positions = &PositionService{resource: newResource[Position, PositionParams, *PositionFilter](c, positionsPath)}
+	c.Terminals = &TerminalService{collection: newCollection[Terminal, *TerminalFilter](c, terminalsPath)}
+	c.Transactions = &TransactionService{collection: newCollection[Transaction, *TransactionFilter](c, transactionsPath)}
 	return c, nil
 }
 
@@ -121,6 +136,10 @@ func (c *Client) SetToken(token string) {
 // Login obtains a fresh access token with the configured credentials and
 // stores it in the client. Calling it explicitly is optional: the first
 // request that needs a token logs in automatically.
+//
+// Rejected credentials are reported by the server as a 400 validation
+// response; the returned error matches both [ErrUnauthorized] and
+// [ErrValidation] and can be unwrapped into an [*Error].
 func (c *Client) Login(ctx context.Context) (string, error) {
 	if c.creds == nil {
 		return "", ErrNoCredentials
@@ -129,6 +148,11 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 		Token string `json:"token"`
 	}
 	if err := c.request(ctx, http.MethodPost, c.scheme.loginPath(), nil, c.creds, &resp, false); err != nil {
+		var apiErr *Error
+		if errors.As(err, &apiErr) {
+			c.log(ctx, "biotime: login rejected", "scheme", string(c.scheme), "status", apiErr.StatusCode)
+			apiErr.login = true
+		}
 		return "", err
 	}
 	if resp.Token == "" {
@@ -164,6 +188,7 @@ func (c *Client) refreshToken(ctx context.Context, rejected string) (string, err
 	if t := c.Token(); t != "" && t != rejected {
 		return t, nil
 	}
+	c.log(ctx, "biotime: token rejected, re-authenticating", "scheme", string(c.scheme))
 	return c.Login(ctx)
 }
 
@@ -190,7 +215,7 @@ func (c *Client) Post(ctx context.Context, path string, body, out any) error {
 // request executes one API call, retrying once with a fresh token when the
 // server answers 401 and credentials are available.
 func (c *Client) request(ctx context.Context, method, path string, query url.Values, body, out any, auth bool) error {
-	payload, err := encodeBody(body)
+	payload, err := encodeBody(body, c.maxBody)
 	if err != nil {
 		return err
 	}
@@ -255,8 +280,9 @@ type envelope interface {
 	envelopeCode() int
 }
 
-// send performs a single HTTP exchange and reads the whole body.
-func (c *Client) send(ctx context.Context, method string, target *url.URL, payload []byte, token string) (int, []byte, error) {
+// send performs a single HTTP exchange and reads the whole body, up to the
+// configured size limit.
+func (c *Client) send(ctx context.Context, method string, target *url.URL, payload []byte, token string) (status int, body []byte, err error) {
 	var reader io.Reader
 	if payload != nil {
 		reader = bytes.NewReader(payload)
@@ -279,9 +305,9 @@ func (c *Client) send(ctx context.Context, method string, target *url.URL, paylo
 	if err != nil {
 		return 0, nil, fmt.Errorf("biotime: %s %s: %w", method, target, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err = readCapped(resp.Body, c.maxBody)
 	if err != nil {
 		return 0, nil, fmt.Errorf("biotime: reading %s %s response: %w", method, target, err)
 	}
@@ -295,8 +321,26 @@ func (c *Client) send(ctx context.Context, method string, target *url.URL, paylo
 	return resp.StatusCode, body, nil
 }
 
-// encodeBody turns body into the bytes to send. nil yields nil.
-func encodeBody(body any) ([]byte, error) {
+// errBodyTooLarge is wrapped by readCapped when a body exceeds the limit.
+var errBodyTooLarge = errors.New("body exceeds the configured size limit")
+
+// readCapped reads r to the end, failing when it holds more than limit
+// bytes. limit is below math.MaxInt64, so limit+1 cannot overflow.
+func readCapped(r io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%w (%d bytes)", errBodyTooLarge, limit)
+	}
+	return data, nil
+}
+
+// encodeBody turns body into the bytes to send. nil yields nil. Reader
+// bodies are buffered so that a request rejected with 401 can be replayed
+// after re-authentication, hence the cap.
+func encodeBody(body any, maxBody int64) ([]byte, error) {
 	switch b := body.(type) {
 	case nil:
 		return nil, nil
@@ -305,7 +349,7 @@ func encodeBody(body any) ([]byte, error) {
 	case json.RawMessage:
 		return b, nil
 	case io.Reader:
-		data, err := io.ReadAll(b)
+		data, err := readCapped(b, maxBody)
 		if err != nil {
 			return nil, fmt.Errorf("biotime: reading request body: %w", err)
 		}

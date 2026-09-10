@@ -17,7 +17,7 @@ The differences are handled inside the client: list pages decode either
 envelope, related objects decode whether the server expands them or returns a
 bare id, and timestamps decode the server's naive `2006-01-02 15:04:05` format.
 
-Requires Go 1.23+ (range-over-func iterators). No third-party modules.
+Requires Go 1.24+. No third-party modules.
 
 ## Install
 
@@ -53,7 +53,7 @@ func main() {
 	// Stream every punch of the last 24 hours, page by page.
 	filter := &biotime.TransactionFilter{
 		StartTime:   time.Now().Add(-24 * time.Hour),
-		ListOptions: biotime.ListOptions{PageSize: 200, Ordering: "punch_time"},
+		ListOptions: biotime.ListOptions{PageSize: 200, Ordering: "punch_time,id"},
 	}
 	for tx, err := range client.Transactions.All(ctx, filter) {
 		if err != nil {
@@ -82,9 +82,14 @@ which keeps long-running programs working across JWT expiry. Call
 | `client.Transactions` | `/iclock/api/transactions/` | `List`, `All`, `Get` |
 
 `List` returns one `Page[T]` (with `Count` and `HasNext()`); `All` returns an
-`iter.Seq2[T, error]` that fetches pages on demand and stops when you `break`.
-`biotime.Collect` drains an iterator into a slice. `Update` sends `PATCH`, so
-only the fields you set are changed:
+`iter.Seq2[T, error]` that follows the server's `next` links on demand and
+stops when you `break`. Only the query parameters of `next` are used, never
+its host, so servers behind a proxy that advertise an internal address still
+work; a server that keeps advertising a page it already served ends the walk
+with an error instead of looping. `biotime.Collect` drains an iterator into a
+slice. `Update` sends `PATCH`, so only the fields you set are changed; an
+empty, non-nil slice such as `Area: []int{}` is sent and clears the
+assignment, a nil one is omitted:
 
 ```go
 emp, err := client.Employees.Create(ctx, &biotime.EmployeeParams{
@@ -93,7 +98,7 @@ emp, err := client.Employees.Create(ctx, &biotime.EmployeeParams{
 	LastName:   biotime.Ptr("Potter"),
 	Department: biotime.Ptr(1),
 	Area:       []int{1},
-	HireDate:   biotime.Ptr(biotime.NewDate(time.Now())),
+	HireDate:   biotime.NewDate(time.Now()),
 	Extra:      map[string]any{"Passport": "AB123"}, // custom fields defined in the server UI
 })
 
@@ -118,7 +123,11 @@ err := client.Do(ctx, http.MethodPost, "/att/api/manualLogs/", nil, map[string]a
 
 Every non-2xx response, and every 9.0 list response with a non-zero `code`,
 is returned as a `*biotime.Error` carrying the status, the server message and
-any per-field validation messages. Sentinels work with `errors.Is`:
+any per-field validation messages. Redirects are not followed and surface as
+a `3xx` error, because a followed redirect would turn a `POST` into a `GET`
+and silently decode the wrong resource. Rejected credentials match
+`ErrUnauthorized` (and `ErrValidation`, which is how the server frames them).
+Sentinels work with `errors.Is`:
 
 ```go
 _, err := client.Employees.Get(ctx, 999)
@@ -135,17 +144,31 @@ case errors.Is(err, biotime.ErrValidation):
 ## Time zones
 
 ZKBio Time stores and returns wall-clock times without zone information. The
-client interprets them, and formats `StartTime`/`EndTime` filters, in the zone
-returned by `biotime.Location()`, which defaults to `time.Local`. Call
-`biotime.SetLocation` once at start-up when your program runs in a different
-zone than the server.
+client interprets them, and encodes every `DateTime`, `Date` and
+`StartTime`/`EndTime` filter it sends, in the zone returned by
+`biotime.Location()`, which defaults to `time.Local`. That default is wrong
+whenever the program runs in a different zone than the server, which is the
+norm in containers (UTC), so call `biotime.SetLocation` once at start-up.
+The setting is package wide: one process talks to servers in one zone.
+
+## Walking punches
+
+Pagination is by page number over live data. Punches keep arriving and many
+share a `punch_time`, so a walk ordered by `punch_time` alone is not stable
+across pages. The filter is sent exactly as written; for a lossless export
+order by `"punch_time,id"`, bound the window with an `EndTime` in the past,
+and continue from there on the next run. A server that keeps advertising a
+page it already served ends the walk with an error, but that page has
+already been yielded, so a consumer that writes as it reads should dedupe on
+`ID`.
 
 ## Other options
 
 | Option | Purpose |
 |---|---|
-| `WithHTTPClient(*http.Client)` | custom transport, TLS settings, proxies |
+| `WithHTTPClient(*http.Client)` | custom transport, TLS settings, proxies (set `CheckRedirect` to return `http.ErrUseLastResponse`) |
 | `WithTimeout(d)` | per-request timeout of the default client (30s) |
+| `WithMaxBodySize(n)` | cap on buffered response and reader request bodies (32 MiB) |
 | `WithLogger(*slog.Logger)` | debug-log every request (never logs tokens or passwords) |
 | `WithUserAgent(s)` | custom `User-Agent` |
 | `WithPageSizeParam(name)` | override the page size parameter for non-standard servers |

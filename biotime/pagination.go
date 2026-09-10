@@ -3,7 +3,10 @@ package biotime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"iter"
+	"maps"
+	"net/http"
 	"net/url"
 	"strconv"
 	"time"
@@ -20,6 +23,13 @@ type ListOptions struct {
 	PageSize int
 	// Ordering is a comma separated list of fields to sort by. Prefix a
 	// field with "-" for descending order, e.g. "-punch_time".
+	//
+	// Pagination is by page number over live data. Rows inserted while a
+	// walk is in progress shift the pages, and rows with equal sort keys
+	// have no stable order between requests. For a lossless walk order by a
+	// key that is unique and monotonic for the rows in range (e.g. "id") or
+	// add it as a tiebreaker (e.g. "punch_time,id"), and bound the query to
+	// a closed range in the past.
 	Ordering string
 }
 
@@ -98,30 +108,41 @@ func (p *Page[T]) envelopeCode() int { return p.Code }
 // listPage fetches a single page from a collection endpoint.
 func listPage[T any](ctx context.Context, c *Client, path string, q url.Values) (*Page[T], error) {
 	var page Page[T]
-	if err := c.request(ctx, "GET", path, q, nil, &page, true); err != nil {
+	if err := c.request(ctx, http.MethodGet, path, q, nil, &page, true); err != nil {
 		return nil, err
 	}
 	return &page, nil
 }
 
-// iterate walks a collection page by page starting at the page named in q
-// (or 1) and yields every object. Iteration stops at the first error, which
-// is yielded with a zero value.
+// iterate walks a collection starting at the page selected by q and yields
+// every object. Subsequent pages are requested with the query parameters of
+// the server's "next" link, so the walk works whether the server paginates
+// by page number or by offset. Iteration stops at the first error, which is
+// yielded with a zero value.
+//
+// A server that keeps advertising a page it has already served ends the walk
+// with an error rather than looping forever. The repeated page has already
+// been yielded by then; consumers that write as they read should dedupe on
+// identifier or buffer a page before committing.
+//
+// The returned sequence can be ranged over any number of times, and
+// concurrently; every walk starts from the first page.
 func iterate[T any](ctx context.Context, c *Client, path string, q url.Values) iter.Seq2[T, error] {
 	return func(yield func(T, error) bool) {
-		q = cloneValues(q)
-		page := 1
-		if v := q.Get("page"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				page = n
-			}
+		fail := func(err error) {
+			var zero T
+			yield(zero, err)
 		}
+		// Per-walk state: the captured q is never written.
+		cur := url.Values{}
+		if q != nil {
+			cur = maps.Clone(q)
+		}
+		seen := map[string]struct{}{cur.Encode(): {}}
 		for {
-			q.Set("page", strconv.Itoa(page))
-			p, err := listPage[T](ctx, c, path, q)
+			p, err := listPage[T](ctx, c, path, cur)
 			if err != nil {
-				var zero T
-				yield(zero, err)
+				fail(err)
 				return
 			}
 			for _, item := range p.Results {
@@ -132,9 +153,34 @@ func iterate[T any](ctx context.Context, c *Client, path string, q url.Values) i
 			if !p.HasNext() || len(p.Results) == 0 {
 				return
 			}
-			page++
+			next, err := nextQuery(cur, p.Next)
+			if err != nil {
+				fail(err)
+				return
+			}
+			key := next.Encode()
+			if _, dup := seen[key]; dup {
+				fail(fmt.Errorf("biotime: server repeated page %q, aborting iteration", key))
+				return
+			}
+			seen[key] = struct{}{}
+			cur = next
 		}
 	}
+}
+
+// nextQuery derives the query for the following page from the server's
+// "next" link. Only the link's query parameters are used, overlaid on the
+// current ones: servers behind a proxy advertise internal addresses in the
+// link, and the paging parameters are all that differs between pages.
+func nextQuery(cur url.Values, next string) (url.Values, error) {
+	u, err := url.Parse(next)
+	if err != nil {
+		return nil, fmt.Errorf("biotime: invalid next link %q: %w", next, err)
+	}
+	q := maps.Clone(cur)
+	maps.Copy(q, u.Query())
+	return q, nil
 }
 
 // Collect drains an iterator produced by one of the All methods into a slice.
@@ -148,14 +194,6 @@ func Collect[T any](seq iter.Seq2[T, error]) ([]T, error) {
 		out = append(out, item)
 	}
 	return out, nil
-}
-
-func cloneValues(q url.Values) url.Values {
-	out := make(url.Values, len(q)+1)
-	for k, v := range q {
-		out[k] = append([]string(nil), v...)
-	}
-	return out
 }
 
 // query is a small builder for filter parameters that skips zero values.
@@ -183,20 +221,21 @@ func (q query) intPtr(key string, val *int) {
 	}
 }
 
-func (q query) boolPtr(key string, val *bool) {
-	if val != nil {
-		q.Set(key, strconv.FormatBool(*val))
-	}
-}
-
 func (q query) time(key string, val time.Time) {
 	if !val.IsZero() {
 		q.Set(key, val.In(Location()).Format(DateTimeLayout))
 	}
 }
 
-func (q query) date(key string, val time.Time) {
-	if !val.IsZero() {
-		q.Set(key, val.In(Location()).Format(DateLayout))
+// buildQuery assembles the query of a list call: paging and ordering from o,
+// resource specific filters from fill, and raw params last so that callers
+// can override anything.
+func buildQuery(o ListOptions, params map[string]string, pageSizeParam string, fill func(q query)) url.Values {
+	q := newQuery()
+	o.apply(q.Values, pageSizeParam)
+	fill(q)
+	for k, v := range params {
+		q.Set(k, v)
 	}
+	return q.Values
 }

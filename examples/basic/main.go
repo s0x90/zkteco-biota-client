@@ -91,7 +91,7 @@ func run(version int, jwt bool, since time.Duration, debug bool) error {
 	fmt.Printf("== Punches since %s\n", since)
 	filter := &biotime.TransactionFilter{
 		StartTime:   time.Now().Add(-since),
-		ListOptions: biotime.ListOptions{PageSize: 100, Ordering: "punch_time"},
+		ListOptions: biotime.ListOptions{PageSize: 100, Ordering: "punch_time,id"},
 	}
 	var n int
 	for tx, err := range client.Transactions.All(ctx, filter) {

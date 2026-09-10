@@ -3,6 +3,7 @@ package biotime
 import (
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
 	"time"
 )
@@ -61,7 +62,8 @@ func (s AuthScheme) loginPath() string {
 	return "/api-token-auth/"
 }
 
-// Option configures a [Client]. Options are applied in order by [New].
+// Option configures a [Client]. Options are independent of each other and
+// may be passed in any order.
 type Option func(*Client) error
 
 // WithVersion sets the server generation. The default is [Version9].
@@ -71,14 +73,13 @@ func WithVersion(v Version) Option {
 			return errors.New("biotime: unsupported version")
 		}
 		c.version = v
-		c.pageSizeParam = v.pageSizeParam()
 		return nil
 	}
 }
 
 // WithPageSizeParam overrides the query parameter used to request a page
 // size, for servers that deviate from the documented default of their
-// generation. It must be applied after [WithVersion] to take effect.
+// generation.
 func WithPageSizeParam(name string) Option {
 	return func(c *Client) error {
 		if name == "" {
@@ -127,7 +128,10 @@ func WithAuthScheme(s AuthScheme) Option {
 }
 
 // WithHTTPClient sets the underlying [http.Client]. Use it to configure TLS,
-// proxies, or custom transports. The default client has a 30 second timeout.
+// proxies, or custom transports. The default client has a 30 second timeout
+// and does not follow redirects, because a followed redirect turns a POST
+// into a GET and silently decodes the wrong resource; a custom client should
+// set CheckRedirect to return [http.ErrUseLastResponse] for the same reason.
 func WithHTTPClient(hc *http.Client) Option {
 	return func(c *Client) error {
 		if hc == nil {
@@ -146,6 +150,22 @@ func WithTimeout(d time.Duration) Option {
 			return errors.New("biotime: timeout must be positive")
 		}
 		c.timeout = d
+		return nil
+	}
+}
+
+// WithMaxBodySize caps the number of bytes buffered for a response body and
+// for an [io.Reader] request body passed to [Client.Do]. Larger bodies fail
+// with an error instead of being read into memory. The default is 32 MiB;
+// pass [math.MaxInt64] for no practical limit.
+func WithMaxBodySize(n int64) Option {
+	return func(c *Client) error {
+		if n <= 0 {
+			return errors.New("biotime: max body size must be positive")
+		}
+		// readCapped reads limit+1 bytes to detect overflow; keep that sum
+		// representable.
+		c.maxBody = min(n, math.MaxInt64-1)
 		return nil
 	}
 }

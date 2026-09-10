@@ -72,40 +72,35 @@ type TerminalFilter struct {
 }
 
 func (f *TerminalFilter) values(pageSizeParam string) url.Values {
-	q := newQuery()
 	if f == nil {
-		return q.Values
+		return url.Values{}
 	}
-	f.ListOptions.apply(q.Values, pageSizeParam)
-	q.str("sn", f.SN)
-	q.str("alias", f.Alias)
-	q.int("area", f.Area)
-	for k, v := range f.Params {
-		q.Set(k, v)
-	}
-	return q.Values
+	return buildQuery(f.ListOptions, f.Params, pageSizeParam, func(q query) {
+		q.str("sn", f.SN)
+		q.str("alias", f.Alias)
+		q.int("area", f.Area)
+	})
 }
 
-// TerminalService accesses /iclock/api/terminals/.
+// TerminalService accesses /iclock/api/terminals/. Devices are read-only
+// through the API.
 type TerminalService struct {
-	c *Client
+	collection[Terminal, *TerminalFilter]
 }
 
 // List returns one page of devices matching filter (nil for all).
 func (s *TerminalService) List(ctx context.Context, filter *TerminalFilter) (*Page[Terminal], error) {
-	return listPage[Terminal](ctx, s.c, terminalsPath, filter.values(s.c.pageSizeParam))
+	return s.collection.List(ctx, filter)
 }
 
-// All iterates over every device matching filter.
+// All iterates over every device matching filter, fetching pages on demand
+// by following the server's "next" links. See [ListOptions] for what makes
+// a walk stable.
 func (s *TerminalService) All(ctx context.Context, filter *TerminalFilter) iter.Seq2[Terminal, error] {
-	return iterate[Terminal](ctx, s.c, terminalsPath, filter.values(s.c.pageSizeParam))
+	return s.collection.All(ctx, filter)
 }
 
 // Get returns the device with the given identifier.
 func (s *TerminalService) Get(ctx context.Context, id int) (*Terminal, error) {
-	var t Terminal
-	if err := s.c.Get(ctx, detailPath(terminalsPath, id), nil, &t); err != nil {
-		return nil, err
-	}
-	return &t, nil
+	return s.collection.Get(ctx, id)
 }

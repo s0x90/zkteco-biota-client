@@ -224,12 +224,17 @@ func TestEmployeeExtraFields(t *testing.T) {
 }
 
 func TestEmployeeParamsJSON(t *testing.T) {
+	// NewDate takes the calendar date in Location(); pin it so the expected
+	// value does not depend on where the test runs.
+	SetLocation(time.UTC)
+	t.Cleanup(func() { SetLocation(nil) })
+
 	p := EmployeeParams{
 		EmpCode:    Ptr("employee333"),
 		FirstName:  Ptr("emp3"),
 		Department: Ptr(1),
 		Area:       []int{1},
-		HireDate:   Ptr(NewDate(time.Date(2024, 6, 26, 0, 0, 0, 0, time.UTC))),
+		HireDate:   NewDate(time.Date(2024, 6, 26, 0, 0, 0, 0, time.UTC)),
 		Extra:      map[string]any{"Passport": "AB123", "emp_code": "ignored"},
 	}
 	out, err := json.Marshal(&p)
@@ -246,8 +251,21 @@ func TestEmployeeParamsJSON(t *testing.T) {
 	if m["hire_date"] != "2024-06-26" || m["Passport"] != "AB123" {
 		t.Errorf("got %s", out)
 	}
-	if _, ok := m["last_name"]; ok {
-		t.Errorf("nil field was encoded: %s", out)
+	for _, k := range []string{"last_name", "birthday", "area_omitted"} {
+		if _, ok := m[k]; ok {
+			t.Errorf("unset field %q was encoded: %s", k, out)
+		}
+	}
+
+	// A non-nil empty Area is a request to clear the assignment and must be
+	// sent; a nil one is omitted.
+	out, _ = json.Marshal(&EmployeeParams{Area: []int{}})
+	if string(out) != `{"area":[]}` {
+		t.Errorf("empty area: %s", out)
+	}
+	out, _ = json.Marshal(&EmployeeParams{})
+	if string(out) != `{}` {
+		t.Errorf("zero params: %s", out)
 	}
 	if _, ok := m["Extra"]; ok {
 		t.Errorf("Extra map itself was encoded: %s", out)
@@ -264,5 +282,29 @@ func TestPunchStateString(t *testing.T) {
 	}
 	if got := PunchState(42).String(); got != "PunchState(42)" {
 		t.Error(got)
+	}
+}
+
+func TestTimeEncodingUsesServerZone(t *testing.T) {
+	// The process runs in UTC, the server is at UTC+3: encoded values must
+	// carry the server's wall clock, and dates must be the server's date.
+	SetLocation(time.FixedZone("srv", 3*3600))
+	t.Cleanup(func() { SetLocation(nil) })
+
+	instant := time.Date(2024, 6, 26, 22, 30, 0, 0, time.UTC) // 01:30 next day on the server
+	if got := NewDateTime(instant).String(); got != "2024-06-27 01:30:00" {
+		t.Errorf("DateTime: %s", got)
+	}
+	out, _ := json.Marshal(NewDateTime(instant))
+	if string(out) != `"2024-06-27 01:30:00"` {
+		t.Errorf("DateTime JSON: %s", out)
+	}
+	if got := NewDate(instant).String(); got != "2024-06-27" {
+		t.Errorf("Date: %s", got)
+	}
+	// Round trip: what the server sent comes back unchanged.
+	var d DateTime
+	if err := json.Unmarshal([]byte(`"2024-06-27 01:30:00"`), &d); err != nil || d.String() != "2024-06-27 01:30:00" {
+		t.Errorf("round trip: %v %v", d, err)
 	}
 }

@@ -142,6 +142,11 @@ func (t *Transaction) UnmarshalJSON(b []byte) error {
 }
 
 // TransactionFilter selects punches in [TransactionService.List].
+//
+// Punches arrive continuously and many share a punch_time, so a walk ordered
+// by "punch_time" alone is not stable across pages. For a lossless export use
+// Ordering "punch_time,id", set EndTime in the past, and continue from there
+// with a later window on the next run. The filter is sent as written.
 type TransactionFilter struct {
 	ListOptions
 	EmpCode    string
@@ -155,42 +160,36 @@ type TransactionFilter struct {
 }
 
 func (f *TransactionFilter) values(pageSizeParam string) url.Values {
-	q := newQuery()
 	if f == nil {
-		return q.Values
+		return url.Values{}
 	}
-	f.ListOptions.apply(q.Values, pageSizeParam)
-	q.str("emp_code", f.EmpCode)
-	q.str("terminal_sn", f.TerminalSN)
-	q.time("start_time", f.StartTime)
-	q.time("end_time", f.EndTime)
-	for k, v := range f.Params {
-		q.Set(k, v)
-	}
-	return q.Values
+	return buildQuery(f.ListOptions, f.Params, pageSizeParam, func(q query) {
+		q.str("emp_code", f.EmpCode)
+		q.str("terminal_sn", f.TerminalSN)
+		q.time("start_time", f.StartTime)
+		q.time("end_time", f.EndTime)
+	})
 }
 
-// TransactionService accesses /iclock/api/transactions/.
+// TransactionService accesses /iclock/api/transactions/. Punches are
+// read-only through this endpoint.
 type TransactionService struct {
-	c *Client
+	collection[Transaction, *TransactionFilter]
 }
 
 // List returns one page of punches matching filter (nil for all).
 func (s *TransactionService) List(ctx context.Context, filter *TransactionFilter) (*Page[Transaction], error) {
-	return listPage[Transaction](ctx, s.c, transactionsPath, filter.values(s.c.pageSizeParam))
+	return s.collection.List(ctx, filter)
 }
 
-// All iterates over every punch matching filter, fetching pages on demand.
-// Combine with an Ordering of "punch_time" or "id" for a stable walk.
+// All iterates over every punch matching filter, fetching pages on demand
+// by following the server's "next" links. See [ListOptions] for what makes
+// a walk stable.
 func (s *TransactionService) All(ctx context.Context, filter *TransactionFilter) iter.Seq2[Transaction, error] {
-	return iterate[Transaction](ctx, s.c, transactionsPath, filter.values(s.c.pageSizeParam))
+	return s.collection.All(ctx, filter)
 }
 
 // Get returns the punch with the given identifier.
 func (s *TransactionService) Get(ctx context.Context, id int) (*Transaction, error) {
-	var t Transaction
-	if err := s.c.Get(ctx, detailPath(transactionsPath, id), nil, &t); err != nil {
-		return nil, err
-	}
-	return &t, nil
+	return s.collection.Get(ctx, id)
 }

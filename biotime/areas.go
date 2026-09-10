@@ -3,7 +3,6 @@ package biotime
 import (
 	"context"
 	"iter"
-	"net/http"
 	"net/url"
 )
 
@@ -17,7 +16,7 @@ type Area struct {
 	AreaName string `json:"area_name"`
 	// ParentArea is null for top-level areas.
 	ParentArea     Ref[Area] `json:"parent_area"`
-	ParentAreaName string    `json:"parent_area_name,omitempty"`
+	ParentAreaName string    `json:"parent_area_name,omitzero"`
 }
 
 // AreaFilter selects areas in [AreaService.List].
@@ -32,71 +31,43 @@ type AreaFilter struct {
 }
 
 func (f *AreaFilter) values(pageSizeParam string) url.Values {
-	q := newQuery()
 	if f == nil {
-		return q.Values
+		return url.Values{}
 	}
-	f.ListOptions.apply(q.Values, pageSizeParam)
-	q.str("area_code", f.AreaCode)
-	q.str("area_name", f.AreaName)
-	q.int("parent_area", f.ParentArea)
-	for k, v := range f.Params {
-		q.Set(k, v)
-	}
-	return q.Values
+	return buildQuery(f.ListOptions, f.Params, pageSizeParam, func(q query) {
+		q.str("area_code", f.AreaCode)
+		q.str("area_name", f.AreaName)
+		q.int("parent_area", f.ParentArea)
+	})
 }
 
-// AreaParams is the payload for creating or updating an area.
+// AreaParams is the payload for creating or updating an area. AreaCode and
+// AreaName are required by the server on create.
 type AreaParams struct {
-	AreaCode *string `json:"area_code,omitempty"`
-	AreaName *string `json:"area_name,omitempty"`
+	AreaCode *string `json:"area_code,omitzero"`
+	AreaName *string `json:"area_name,omitzero"`
 	// ParentArea is the parent area identifier.
-	ParentArea *int `json:"parent_area,omitempty"`
+	ParentArea *int `json:"parent_area,omitzero"`
 }
 
 // AreaService accesses /personnel/api/areas/.
 type AreaService struct {
-	c *Client
+	resource[Area, AreaParams, *AreaFilter]
 }
 
 // List returns one page of areas matching filter (nil for all).
 func (s *AreaService) List(ctx context.Context, filter *AreaFilter) (*Page[Area], error) {
-	return listPage[Area](ctx, s.c, areasPath, filter.values(s.c.pageSizeParam))
+	return s.resource.List(ctx, filter)
 }
 
-// All iterates over every area matching filter.
+// All iterates over every area matching filter, fetching pages on demand
+// by following the server's "next" links. See [ListOptions] for what makes
+// a walk stable.
 func (s *AreaService) All(ctx context.Context, filter *AreaFilter) iter.Seq2[Area, error] {
-	return iterate[Area](ctx, s.c, areasPath, filter.values(s.c.pageSizeParam))
+	return s.resource.All(ctx, filter)
 }
 
 // Get returns the area with the given identifier.
 func (s *AreaService) Get(ctx context.Context, id int) (*Area, error) {
-	var a Area
-	if err := s.c.Get(ctx, detailPath(areasPath, id), nil, &a); err != nil {
-		return nil, err
-	}
-	return &a, nil
-}
-
-// Create adds an area. AreaCode and AreaName are required by the server.
-func (s *AreaService) Create(ctx context.Context, params *AreaParams) (*Area, error) {
-	var a Area
-	if err := s.c.Post(ctx, areasPath, params, &a); err != nil {
-		return nil, err
-	}
-	return &a, nil
-}
-
-// Update changes the provided fields of an area (HTTP PATCH).
-func (s *AreaService) Update(ctx context.Context, id int, params *AreaParams) (*Area, error) {
-	var a Area
-	if err := s.c.Do(ctx, http.MethodPatch, detailPath(areasPath, id), nil, params, &a); err != nil {
-		return nil, err
-	}
-	return &a, nil
-}
-
-// Delete removes an area.
-func (s *AreaService) Delete(ctx context.Context, id int) error {
-	return s.c.Do(ctx, http.MethodDelete, detailPath(areasPath, id), nil, nil, nil)
+	return s.resource.Get(ctx, id)
 }

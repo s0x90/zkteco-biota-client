@@ -53,7 +53,7 @@ type Employee struct {
 	AppRole   int         `json:"app_role"`
 	// FlowRole is the approval workflow role list; its shape varies by
 	// server version so it is kept raw.
-	FlowRole   json.RawMessage `json:"flow_role,omitempty"`
+	FlowRole   json.RawMessage `json:"flow_role,omitzero"`
 	UpdateTime DateTime        `json:"update_time"`
 	// Biometric enrollment summaries such as "Ver 10:1" or "-".
 	Fingerprint string `json:"fingerprint"`
@@ -110,54 +110,53 @@ type EmployeeFilter struct {
 }
 
 func (f *EmployeeFilter) values(pageSizeParam string) url.Values {
-	q := newQuery()
 	if f == nil {
-		return q.Values
+		return url.Values{}
 	}
-	f.ListOptions.apply(q.Values, pageSizeParam)
-	q.str("emp_code", f.EmpCode)
-	q.str("first_name", f.FirstName)
-	q.str("last_name", f.LastName)
-	q.int("department", f.Department)
-	q.intPtr("app_status", f.AppStatus)
-	for k, v := range f.Params {
-		q.Set(k, v)
-	}
-	return q.Values
+	return buildQuery(f.ListOptions, f.Params, pageSizeParam, func(q query) {
+		q.str("emp_code", f.EmpCode)
+		q.str("first_name", f.FirstName)
+		q.str("last_name", f.LastName)
+		q.int("department", f.Department)
+		q.intPtr("app_status", f.AppStatus)
+	})
 }
 
 // EmployeeParams is the payload for creating or updating an employee. Only
-// non-nil fields are sent, so an update changes just the fields provided.
+// fields that are set are sent, so an update changes just the fields
+// provided: nil pointers, zero dates and a nil Area are omitted. An empty,
+// non-nil Area ([]int{}) is sent and clears the assignment. EmpCode,
+// FirstName, Department and Area are required by the server on create.
 type EmployeeParams struct {
-	EmpCode        *string `json:"emp_code,omitempty"`
-	FirstName      *string `json:"first_name,omitempty"`
-	LastName       *string `json:"last_name,omitempty"`
-	Nickname       *string `json:"nickname,omitempty"`
-	DevicePassword *string `json:"device_password,omitempty"`
-	CardNo         *string `json:"card_no,omitempty"`
+	EmpCode        *string `json:"emp_code,omitzero"`
+	FirstName      *string `json:"first_name,omitzero"`
+	LastName       *string `json:"last_name,omitzero"`
+	Nickname       *string `json:"nickname,omitzero"`
+	DevicePassword *string `json:"device_password,omitzero"`
+	CardNo         *string `json:"card_no,omitzero"`
 	// Department is the department identifier. Required on create.
-	Department *int `json:"department,omitempty"`
-	Position   *int `json:"position,omitempty"`
+	Department *int `json:"department,omitzero"`
+	Position   *int `json:"position,omitzero"`
 	// Area lists area identifiers. Required on create.
-	Area         []int   `json:"area,omitempty"`
-	HireDate     *Date   `json:"hire_date,omitempty"`
-	Gender       *string `json:"gender,omitempty"`
-	Birthday     *Date   `json:"birthday,omitempty"`
-	VerifyMode   *int    `json:"verify_mode,omitempty"`
-	EmpType      *int    `json:"emp_type,omitempty"`
-	ContactTel   *string `json:"contact_tel,omitempty"`
-	OfficeTel    *string `json:"office_tel,omitempty"`
-	Mobile       *string `json:"mobile,omitempty"`
-	National     *string `json:"national,omitempty"`
-	City         *string `json:"city,omitempty"`
-	Address      *string `json:"address,omitempty"`
-	Postcode     *string `json:"postcode,omitempty"`
-	Email        *string `json:"email,omitempty"`
-	SSN          *string `json:"ssn,omitempty"`
-	Religion     *string `json:"religion,omitempty"`
-	DevPrivilege *int    `json:"dev_privilege,omitempty"`
-	AppStatus    *int    `json:"app_status,omitempty"`
-	AppRole      *int    `json:"app_role,omitempty"`
+	Area         []int   `json:"area,omitzero"`
+	HireDate     Date    `json:"hire_date,omitzero"`
+	Gender       *string `json:"gender,omitzero"`
+	Birthday     Date    `json:"birthday,omitzero"`
+	VerifyMode   *int    `json:"verify_mode,omitzero"`
+	EmpType      *int    `json:"emp_type,omitzero"`
+	ContactTel   *string `json:"contact_tel,omitzero"`
+	OfficeTel    *string `json:"office_tel,omitzero"`
+	Mobile       *string `json:"mobile,omitzero"`
+	National     *string `json:"national,omitzero"`
+	City         *string `json:"city,omitzero"`
+	Address      *string `json:"address,omitzero"`
+	Postcode     *string `json:"postcode,omitzero"`
+	Email        *string `json:"email,omitzero"`
+	SSN          *string `json:"ssn,omitzero"`
+	Religion     *string `json:"religion,omitzero"`
+	DevPrivilege *int    `json:"dev_privilege,omitzero"`
+	AppStatus    *int    `json:"app_status,omitzero"`
+	AppRole      *int    `json:"app_role,omitzero"`
 	// Extra holds custom attributes, keyed by their JSON name, that are
 	// merged into the payload.
 	Extra map[string]any `json:"-"`
@@ -171,63 +170,38 @@ func (p EmployeeParams) MarshalJSON() ([]byte, error) {
 
 // EmployeeService accesses /personnel/api/employees/.
 type EmployeeService struct {
-	c *Client
+	resource[Employee, EmployeeParams, *EmployeeFilter]
 }
 
 // List returns one page of employees matching filter (nil for all).
 func (s *EmployeeService) List(ctx context.Context, filter *EmployeeFilter) (*Page[Employee], error) {
-	return listPage[Employee](ctx, s.c, employeesPath, filter.values(s.c.pageSizeParam))
+	return s.resource.List(ctx, filter)
 }
 
-// All iterates over every employee matching filter, fetching pages on demand.
+// All iterates over every employee matching filter, fetching pages on demand
+// by following the server's "next" links. See [ListOptions] for what makes
+// a walk stable.
 func (s *EmployeeService) All(ctx context.Context, filter *EmployeeFilter) iter.Seq2[Employee, error] {
-	return iterate[Employee](ctx, s.c, employeesPath, filter.values(s.c.pageSizeParam))
+	return s.resource.All(ctx, filter)
 }
 
 // Get returns the employee with the given identifier.
 func (s *EmployeeService) Get(ctx context.Context, id int) (*Employee, error) {
-	var e Employee
-	if err := s.c.Get(ctx, detailPath(employeesPath, id), nil, &e); err != nil {
-		return nil, err
-	}
-	return &e, nil
+	return s.resource.Get(ctx, id)
 }
 
 // GetByCode returns the employee with the given employee code, or an error
-// matching [ErrNotFound].
+// matching [ErrNotFound]. The server matches emp_code as a prefix, so every
+// page of candidates is scanned for the exact code.
 func (s *EmployeeService) GetByCode(ctx context.Context, empCode string) (*Employee, error) {
-	page, err := s.List(ctx, &EmployeeFilter{EmpCode: empCode, ListOptions: ListOptions{PageSize: 50}})
-	if err != nil {
-		return nil, err
-	}
-	for i := range page.Results {
-		if page.Results[i].EmpCode == empCode {
-			return &page.Results[i], nil
+	filter := &EmployeeFilter{EmpCode: empCode, ListOptions: ListOptions{PageSize: 100}}
+	for e, err := range s.All(ctx, filter) {
+		if err != nil {
+			return nil, err
+		}
+		if e.EmpCode == empCode {
+			return &e, nil
 		}
 	}
 	return nil, &Error{StatusCode: http.StatusNotFound, Method: http.MethodGet, URL: employeesPath, Message: "employee " + empCode + " not found"}
-}
-
-// Create adds an employee. EmpCode, FirstName, Department and Area are
-// required by the server.
-func (s *EmployeeService) Create(ctx context.Context, params *EmployeeParams) (*Employee, error) {
-	var e Employee
-	if err := s.c.Post(ctx, employeesPath, params, &e); err != nil {
-		return nil, err
-	}
-	return &e, nil
-}
-
-// Update changes the provided fields of an employee (HTTP PATCH).
-func (s *EmployeeService) Update(ctx context.Context, id int, params *EmployeeParams) (*Employee, error) {
-	var e Employee
-	if err := s.c.Do(ctx, http.MethodPatch, detailPath(employeesPath, id), nil, params, &e); err != nil {
-		return nil, err
-	}
-	return &e, nil
-}
-
-// Delete removes an employee.
-func (s *EmployeeService) Delete(ctx context.Context, id int) error {
-	return s.c.Do(ctx, http.MethodDelete, detailPath(employeesPath, id), nil, nil, nil)
 }
