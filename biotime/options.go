@@ -2,6 +2,7 @@ package biotime
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
@@ -170,9 +171,24 @@ func WithMaxBodySize(n int64) Option {
 	}
 }
 
+// validHeaderValue reports whether v can be sent as an HTTP header value:
+// visible ASCII, space and tab, per RFC 9110. The transport rejects anything
+// else on every request; checking here reports it once, at [New].
+func validHeaderValue(v string) bool {
+	for i := range len(v) {
+		if c := v[i]; c != '\t' && (c < ' ' || c == 0x7f) {
+			return false
+		}
+	}
+	return true
+}
+
 // WithUserAgent sets the User-Agent header sent with every request.
 func WithUserAgent(ua string) Option {
 	return func(c *Client) error {
+		if !validHeaderValue(ua) {
+			return fmt.Errorf("biotime: invalid User-Agent %q", ua)
+		}
 		c.userAgent = ua
 		return nil
 	}
@@ -186,6 +202,9 @@ func WithUserAgent(ua string) Option {
 // server's locale; pass "" to send no header and get the server's default.
 func WithLanguage(tag string) Option {
 	return func(c *Client) error {
+		if !validHeaderValue(tag) {
+			return fmt.Errorf("biotime: invalid Accept-Language %q", tag)
+		}
 		c.language = tag
 		return nil
 	}

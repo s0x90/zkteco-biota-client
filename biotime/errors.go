@@ -22,6 +22,12 @@ var (
 	// ErrNoCredentials is returned when a request needs a token but neither
 	// [WithToken] nor [WithCredentials] were configured.
 	ErrNoCredentials = errors.New("biotime: no token or credentials configured")
+	// ErrUnsupportedField is wrapped by the error returned when the server
+	// accepted a write with 2xx but the returned object shows that a field
+	// of the request was ignored, which Django REST framework does silently
+	// for members it does not know. The object was still written and is
+	// returned alongside the error.
+	ErrUnsupportedField = errors.New("biotime: server ignored a request field")
 )
 
 // Error describes a failed API call. It is returned for any non-2xx response

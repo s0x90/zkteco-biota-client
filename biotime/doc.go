@@ -8,9 +8,9 @@
 // details that the client hides from callers:
 //
 //   - 8.x paginates with the "page_size" query parameter, 9.0 with "limit".
-//   - Early 8.x wraps list responses as {count,next,previous,results}, later
-//     8.x builds and 9.0 as {count,next,previous,code,msg,data}. [Page]
-//     decodes both shapes.
+//   - The tested 8.x build and 9.0 wrap list responses as
+//     {count,next,previous,code,msg,data}; [Page] also decodes the
+//     {count,next,previous,results} form documented for other 8.x builds.
 //   - 8.x issues JWT tokens from /jwt-api-token-auth/ ("Authorization: JWT ...")
 //     and static tokens from /api-token-auth/ ("Authorization: Token ...");
 //     9.0 documents only the latter. Both schemes are available, see [AuthScheme].

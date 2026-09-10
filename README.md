@@ -10,7 +10,7 @@ It supports both server generations:
 | Docs | `http://<server>/api/personnel_docs/`, `/api/iclock_docs/`, `/api/att_docs/` (login required; `/api/docs/` lists only the auth endpoints) | *ZKBio Time 9.0 API User Manual* |
 | Select with | `biotime.WithVersion(biotime.Version8)` | `biotime.WithVersion(biotime.Version9)` (default) |
 | Page size parameter | `page_size` | `limit` |
-| List envelope | `{count,next,previous,results}`; later 8.x builds already use the 9.0 shape | `{count,next,previous,code,msg,data}` |
+| List envelope | `{count,next,previous,results}` per the docs; the tested build already returns the 9.0 shape | `{count,next,previous,code,msg,data}` |
 | Auth | `/jwt-api-token-auth/` (`Authorization: JWT …`) or `/api-token-auth/` (`Authorization: Token …`) | `/api-token-auth/` (`Authorization: Token …`) |
 
 The differences are handled inside the client: list pages decode either
@@ -222,8 +222,14 @@ framework):
 - The `next` links carry the server's internal address; the client uses only
   their query string.
 - Employees carry the attendance flags as top-level `enable_att`,
-  `enable_overtime` and `enable_holiday` (`Employee.EnableAtt` etc.) and the
-  self-service password hash in `self_password`, which the client drops.
+  `enable_overtime` and `enable_holiday`; read them with
+  `Employee.AttendanceEnabled()` and friends, which also understand the 9.0
+  nested form. Writing them through `EmployeeParams` is verified against
+  the returned object, because a server that does not know the fields
+  ignores them silently; a mismatch is reported with `ErrUnsupportedField`.
+  The record also carries the self-service password hash, which the client
+  drops, and the device PIN in clear text, which `Employee.DevicePassword`
+  prints redacted (`Secret`).
 - `first_name` is not required on create; `emp_code`, `department` and `area`
   are.
 - Transactions and terminals accept `POST`, `PATCH` and `DELETE`; the

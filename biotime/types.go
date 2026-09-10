@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"strconv"
 	"strings"
@@ -197,6 +198,36 @@ func (s *FlexString) UnmarshalJSON(b []byte) error {
 
 // String returns the underlying string.
 func (s FlexString) String() string { return string(s) }
+
+// Secret is a credential the server returns in clear text, such as a device
+// PIN. It formats as "[redacted]" with the fmt verbs and with [slog], so
+// that a debug print of the enclosing record does not leak it; read it with
+// [Secret.Value]. JSON encoding writes the value, as the type exists to
+// protect logs, not data transfer. Decoding accepts the same inputs as
+// [FlexString].
+type Secret string
+
+// Value returns the clear-text credential.
+func (s Secret) Value() string { return string(s) }
+
+// String implements [fmt.Stringer] and redacts the value.
+func (s Secret) String() string { return "[redacted]" }
+
+// GoString implements [fmt.GoStringer] and redacts the value.
+func (s Secret) GoString() string { return "[redacted]" }
+
+// LogValue implements [slog.LogValuer] and redacts the value.
+func (s Secret) LogValue() slog.Value { return slog.StringValue("[redacted]") }
+
+// UnmarshalJSON implements [json.Unmarshaler].
+func (s *Secret) UnmarshalJSON(b []byte) error {
+	var f FlexString
+	if err := f.UnmarshalJSON(b); err != nil {
+		return err
+	}
+	*s = Secret(f)
+	return nil
+}
 
 // FlexInt is an integer that also accepts JSON numeric strings when decoding.
 // Use a pointer to distinguish null from zero.

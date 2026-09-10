@@ -3,6 +3,7 @@ package biotime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"iter"
 	"net/http"
 	"net/url"
@@ -13,15 +14,17 @@ const employeesPath = "/personnel/api/employees/"
 
 // Employee is a personnel record.
 type Employee struct {
-	ID             int        `json:"id"`
-	EmpCode        string     `json:"emp_code"`
-	FirstName      string     `json:"first_name"`
-	LastName       string     `json:"last_name"`
-	Nickname       string     `json:"nickname"`
-	FormatName     string     `json:"format_name"`
-	FullName       string     `json:"full_name"`
-	Photo          string     `json:"photo"`
-	DevicePassword FlexString `json:"device_password"`
+	ID         int    `json:"id"`
+	EmpCode    string `json:"emp_code"`
+	FirstName  string `json:"first_name"`
+	LastName   string `json:"last_name"`
+	Nickname   string `json:"nickname"`
+	FormatName string `json:"format_name"`
+	FullName   string `json:"full_name"`
+	Photo      string `json:"photo"`
+	// DevicePassword is the PIN the employee types on a terminal, returned
+	// in clear text. It prints redacted; see [Secret].
+	DevicePassword Secret     `json:"device_password"`
 	CardNo         FlexString `json:"card_no"`
 	// Department is expanded on reads and a bare identifier on writes.
 	Department Ref[Department] `json:"department"`
@@ -46,11 +49,13 @@ type Employee struct {
 	Religion string `json:"religion"`
 	// AttEmployee holds the attendance settings as nested by 9.0; 8.x
 	// returns them as the top-level EnableAtt, EnableOvertime and
-	// EnableHoliday instead.
+	// EnableHoliday instead. Read them through [Employee.AttendanceEnabled],
+	// [Employee.OvertimeEnabled] and [Employee.HolidayEnabled], which
+	// consult both shapes.
 	AttEmployee *AttEmployee `json:"attemployee"`
 	// EnableAtt, EnableOvertime and EnableHoliday are the attendance
 	// settings as returned by 8.x; nil when the server nests them in
-	// AttEmployee.
+	// AttEmployee. Prefer the accessor methods.
 	EnableAtt      *bool `json:"enable_att"`
 	EnableOvertime *bool `json:"enable_overtime"`
 	EnableHoliday  *bool `json:"enable_holiday"`
@@ -87,6 +92,39 @@ type AttEmployee struct {
 }
 
 var employeeType = reflect.TypeFor[Employee]()
+
+// flag returns the attendance setting from whichever shape the server used:
+// the 8.x top-level field when present, else the 9.0 nested object. ok is
+// false when neither carried it.
+func (e *Employee) flag(top *bool, nested func(*AttEmployee) bool) (value, ok bool) {
+	switch {
+	case top != nil:
+		return *top, true
+	case e.AttEmployee != nil:
+		return nested(e.AttEmployee), true
+	default:
+		return false, false
+	}
+}
+
+// AttendanceEnabled reports whether attendance is calculated for the
+// employee, on either server generation. ok is false when the record does
+// not carry the setting.
+func (e *Employee) AttendanceEnabled() (enabled, ok bool) {
+	return e.flag(e.EnableAtt, func(a *AttEmployee) bool { return a.EnableAttendance })
+}
+
+// OvertimeEnabled reports whether overtime is calculated for the employee.
+// See [Employee.AttendanceEnabled].
+func (e *Employee) OvertimeEnabled() (enabled, ok bool) {
+	return e.flag(e.EnableOvertime, func(a *AttEmployee) bool { return a.EnableOvertime })
+}
+
+// HolidayEnabled reports whether holidays apply to the employee. See
+// [Employee.AttendanceEnabled].
+func (e *Employee) HolidayEnabled() (enabled, ok bool) {
+	return e.flag(e.EnableHoliday, func(a *AttEmployee) bool { return a.EnableHoliday })
+}
 
 // UnmarshalJSON implements [json.Unmarshaler], capturing unknown members in
 // Extra. The self-service password hash that 8.x includes in every employee
@@ -175,7 +213,11 @@ type EmployeeParams struct {
 	SSN        *string `json:"ssn,omitzero"`
 	Religion   *string `json:"religion,omitzero"`
 	// EnableAtt, EnableOvertime and EnableHoliday are the attendance
-	// settings; 8.x accepts them as top-level fields.
+	// settings as 8.x accepts them. A server that does not know these
+	// members ignores them without complaint, so [EmployeeService.Create]
+	// and [EmployeeService.Update] compare the returned object with the
+	// request and report a mismatch with an error wrapping
+	// [ErrUnsupportedField].
 	EnableAtt      *bool `json:"enable_att,omitzero"`
 	EnableOvertime *bool `json:"enable_overtime,omitzero"`
 	EnableHoliday  *bool `json:"enable_holiday,omitzero"`
@@ -199,6 +241,51 @@ func (p EmployeeParams) MarshalJSON() ([]byte, error) {
 // EmployeeService accesses /personnel/api/employees/.
 type EmployeeService struct {
 	resource[Employee, EmployeeParams, *EmployeeFilter]
+}
+
+// Create adds an employee. See [EmployeeParams] for the required fields.
+// When the server ignored one of the attendance flags, the created employee
+// is returned together with an error wrapping [ErrUnsupportedField].
+func (s *EmployeeService) Create(ctx context.Context, params *EmployeeParams) (*Employee, error) {
+	e, err := s.resource.Create(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	return e, verifyFlags(params, e)
+}
+
+// Update changes the provided fields of an employee (HTTP PATCH). When the
+// server ignored one of the attendance flags, the updated employee is
+// returned together with an error wrapping [ErrUnsupportedField].
+func (s *EmployeeService) Update(ctx context.Context, id int, params *EmployeeParams) (*Employee, error) {
+	e, err := s.resource.Update(ctx, id, params)
+	if err != nil {
+		return nil, err
+	}
+	return e, verifyFlags(params, e)
+}
+
+// verifyFlags checks that every attendance flag set in params is reflected
+// by the object the server returned for the write.
+func verifyFlags(params *EmployeeParams, e *Employee) error {
+	checks := []struct {
+		name string
+		want *bool
+		got  func() (bool, bool)
+	}{
+		{"enable_att", params.EnableAtt, e.AttendanceEnabled},
+		{"enable_overtime", params.EnableOvertime, e.OvertimeEnabled},
+		{"enable_holiday", params.EnableHoliday, e.HolidayEnabled},
+	}
+	for _, c := range checks {
+		if c.want == nil {
+			continue
+		}
+		if got, ok := c.got(); !ok || got != *c.want {
+			return fmt.Errorf("%w: %s", ErrUnsupportedField, c.name)
+		}
+	}
+	return nil
 }
 
 // List returns one page of employees matching filter (nil for all).

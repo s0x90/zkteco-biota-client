@@ -2,6 +2,9 @@ package biotime
 
 import (
 	"encoding/json"
+	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -204,6 +207,12 @@ func TestEmployeeExtraFields(t *testing.T) {
 	if e.AttEmployee == nil || !e.AttEmployee.EnableAttendance {
 		t.Errorf("attemployee: %+v", e.AttEmployee)
 	}
+	if on, ok := e.AttendanceEnabled(); !ok || !on {
+		t.Errorf("AttendanceEnabled from nested object: %v %v", on, ok)
+	}
+	if _, ok := e.OvertimeEnabled(); !ok {
+		t.Error("OvertimeEnabled should be known when attemployee is present")
+	}
 	if len(e.Area) != 1 || e.Area[0].Object.AreaName != "ZKTeco" {
 		t.Errorf("area: %+v", e.Area)
 	}
@@ -257,12 +266,42 @@ func TestEmployeeLegacyShape(t *testing.T) {
 	if e.VLFace != "1" || e.Face != "-" {
 		t.Errorf("biometric summaries: vl_face %q face %q", e.VLFace, e.Face)
 	}
+	if on, ok := e.AttendanceEnabled(); !ok || !on {
+		t.Errorf("AttendanceEnabled: %v %v", on, ok)
+	}
+	if on, ok := e.OvertimeEnabled(); !ok || on {
+		t.Errorf("OvertimeEnabled: %v %v", on, ok)
+	}
+	b, err := json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.DevicePassword.Value() != "441820" {
+		t.Errorf("device password value %q", e.DevicePassword.Value())
+	}
+	for _, s := range []string{fmt.Sprintf("%v", e), fmt.Sprintf("%+v", e), fmt.Sprintf("%#v", e), fmt.Sprint(e.DevicePassword)} {
+		if strings.Contains(s, "441820") {
+			t.Errorf("device PIN leaked through fmt: %s", s)
+		}
+	}
+	var logged strings.Builder
+	slog.New(slog.NewTextHandler(&logged, nil)).Info("emp", "pin", e.DevicePassword)
+	if strings.Contains(logged.String(), "441820") || !strings.Contains(logged.String(), "redacted") {
+		t.Errorf("device PIN leaked through slog: %s", logged.String())
+	}
+	if !strings.Contains(string(b), `"device_password":"441820"`) {
+		t.Error("JSON encoding must keep the value")
+	}
+
+	var none Employee
+	if _, ok := none.AttendanceEnabled(); ok {
+		t.Error("flag reported as known on an empty record")
+	}
 	if e.Extra != nil {
 		t.Errorf("password hash or other members leaked into Extra: %v", e.Extra)
 	}
 
 	var reencoded map[string]json.RawMessage
-	b, _ := json.Marshal(e)
 	_ = json.Unmarshal(b, &reencoded)
 	if _, ok := reencoded["self_password"]; ok {
 		t.Error("self_password re-encoded")

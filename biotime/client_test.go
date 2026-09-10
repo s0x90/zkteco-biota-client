@@ -547,6 +547,57 @@ func TestCRUD(t *testing.T) {
 	}
 }
 
+func TestEmployeeFlagWriteIsVerified(t *testing.T) {
+	f, srv := newFakeServer(t, Version9, AuthToken)
+	var echo bool
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch && r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		if echo {
+			// 8.x: the flag comes back top level.
+			fmt.Fprint(w, `{"id":7,"emp_code":"7","enable_att":false}`)
+			return
+		}
+		// 9.0: unknown members are dropped and the nested object is unchanged.
+		fmt.Fprint(w, `{"id":7,"emp_code":"7","attemployee":{"id":7,"enable_attendance":true}}`)
+	}
+	c := newTestClient(t, srv)
+	params := &EmployeeParams{EnableAtt: new(false)}
+
+	e, err := c.Employees.Update(t.Context(), 7, params)
+	if !errors.Is(err, ErrUnsupportedField) || !strings.Contains(err.Error(), "enable_att") {
+		t.Fatalf("got %v", err)
+	}
+	if e == nil || e.ID != 7 {
+		t.Errorf("written object must still be returned, got %+v", e)
+	}
+	if _, err := c.Employees.Create(t.Context(), params); !errors.Is(err, ErrUnsupportedField) {
+		t.Errorf("create: got %v", err)
+	}
+
+	echo = true
+	if e, err := c.Employees.Update(t.Context(), 7, params); err != nil || e.ID != 7 {
+		t.Errorf("echoed flag: %+v %v", e, err)
+	}
+	// Flags that were not requested are not checked.
+	if _, err := c.Employees.Update(t.Context(), 7, &EmployeeParams{CardNo: new("1")}); err != nil {
+		t.Errorf("unrelated update: %v", err)
+	}
+}
+
+func TestHeaderOptionsRejectControlCharacters(t *testing.T) {
+	for _, opt := range []Option{WithLanguage("en\r\nX: 1"), WithUserAgent("bad\nagent")} {
+		if _, err := New("http://x", opt); err == nil {
+			t.Error("control characters accepted in a header option")
+		}
+	}
+	if _, err := New("http://x", WithLanguage("ru-RU, ru;q=0.9"), WithUserAgent("app/1.0 (tab\tok)")); err != nil {
+		t.Errorf("valid header values rejected: %v", err)
+	}
+}
+
 func TestGetByCode(t *testing.T) {
 	f, srv := newFakeServer(t, Version8, AuthToken)
 	f.handler = func(w http.ResponseWriter, r *http.Request) {
