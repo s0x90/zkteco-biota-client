@@ -173,6 +173,26 @@ already been yielded, so a consumer that writes as it reads should dedupe on
 | `WithUserAgent(s)` | custom `User-Agent` |
 | `WithPageSizeParam(name)` | override the page size parameter for non-standard servers |
 
+## CI and the self-hosted runner
+
+The workflows under `.github/workflows` run on a self-hosted runner
+registered to this repository, so three things are settings, not YAML:
+
+- **Before this repository is ever made public**, set *Settings → Actions →
+  General → Fork pull request workflows* to "Require approval for all
+  external contributors". On the `pull_request` event the workflow files are
+  read from the pull request itself, so nothing inside them can keep a fork's
+  code off the runner. The "Trusted source" gate only makes such a PR red
+  instead of grey.
+- **Dependabot bumps** run only after a maintainer has read the release notes
+  and added the `ci-approved` label. Create that label once.
+- **Coverage upload** runs only when the repository variable
+  `CODECOV_ENABLED` is `true` and the `CODECOV_TOKEN` secret is set.
+
+The runner needs a C compiler for `go test -race` and network access to the
+Go module proxy, the Go download server, GitHub's artifact storage and, if
+enabled, codecov.io.
+
 ## Example program
 
 `examples/basic` lists devices, departments, employees and recent punches

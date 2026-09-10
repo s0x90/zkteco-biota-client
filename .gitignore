@@ -10,3 +10,7 @@ coverage.*
 .idea/
 .vscode/
 .DS_Store
+
+# Local environment files must never be committed
+.env
+.env.*

@@ -1,0 +1,8 @@
+version: 2
+updates:
+  # Keeps the SHA-pinned actions in the workflows current; each bump arrives
+  # as a reviewable pull request instead of a silently moved tag.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

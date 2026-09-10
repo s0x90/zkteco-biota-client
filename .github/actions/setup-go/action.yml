@@ -1,0 +1,21 @@
+name: Set up Go for this repository
+description: >-
+  Installs the requested Go toolchain with the settings every job here needs.
+  Caching is off because the module has no dependencies and therefore no
+  go.sum, which setup-go requires to key its cache; the self-hosted runner's
+  own module cache persists between jobs anyway.
+
+inputs:
+  go-version:
+    description: Go version spec, e.g. "1.24" or "1.26.x".
+    required: false
+    default: '1.26.x'
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      with:
+        go-version: ${{ inputs.go-version }}
+        check-latest: true
+        cache: false

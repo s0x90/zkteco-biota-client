@@ -1,0 +1,131 @@
+name: Test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    # "labeled" so that adding ci-approved re-runs the gate; a manual re-run
+    # would replay the original event, which predates the label. Any other
+    # label re-runs the pipeline too; concurrency below collapses the churn.
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Every run step is written for bash; make that a decision, not a runner
+# default.
+defaults:
+  run:
+    shell: bash
+
+# One run per ref. Superseded pull request runs are cancelled; pushes to
+# master queue instead, so every merged commit keeps a CI result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gate:
+    uses: ./.github/workflows/gate.yml
+
+  test:
+    name: Test (Go ${{ matrix.go }})
+    needs: gate
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor declared in go.mod and the current release.
+        go: ["1.24", "1.26.x"]
+        include:
+          - go: "1.26.x"
+            coverage: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+        with:
+          go-version: ${{ matrix.go }}
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Build examples
+        run: go build -o /dev/null ./examples/basic
+
+      - name: Verify zero dependencies
+        run: |
+          if [ -f go.sum ] && [ -s go.sum ]; then
+            echo "go.sum is not empty: the client must stay dependency free" >&2
+            exit 1
+          fi
+          test "$(go list -m all)" = "github.com/s0x90/zkteco-biota-client"
+
+      - name: Test
+        run: go test -v -race -coverprofile=coverage.out ./...
+
+      # NewDate and DateTime depend on the configured zone; make sure no test
+      # silently relies on the runner being at or east of UTC.
+      - name: Test west of UTC
+        run: TZ=America/Los_Angeles go test -count=1 ./...
+
+      - name: Keep coverage profile
+        if: matrix.coverage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage
+          path: coverage.out
+          retention-days: 1
+
+  # Separate job so that a Codecov outage reads as "coverage upload failed",
+  # never as "tests failed". Enabled by the CODECOV_ENABLED repository
+  # variable, set together with the CODECOV_TOKEN secret, so a repository
+  # without Codecov does not spend a runner slot on a skip message.
+  coverage:
+    name: Coverage upload
+    needs: test
+    # An explicit `if` replaces the implicit success() check; keep it.
+    if: success() && vars.CODECOV_ENABLED == 'true'
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 10
+    env:
+      # The secrets context is not allowed in `if`; bounce it through env.
+      # Runs without the token (Dependabot, a variable set before the secret)
+      # skip the upload visibly instead of failing on it.
+      HAS_CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN != '' }}
+    steps:
+      # The Codecov CLI reads the commit and file list from git. Without this
+      # step the job would run in whatever checkout the previous job left in
+      # the runner's shared workspace, which is not the same thing.
+      - name: Checkout code
+        if: env.HAS_CODECOV_TOKEN == 'true'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 2
+
+      - name: Fetch coverage profile
+        if: env.HAS_CODECOV_TOKEN == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage
+
+      - name: Upload coverage to Codecov
+        if: env.HAS_CODECOV_TOKEN == 'true'
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6.0.2
+        with:
+          files: coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}
+          # With a token configured, a failed upload must be loud.
+          fail_ci_if_error: true
+
+      - name: Explain the skip
+        if: env.HAS_CODECOV_TOKEN != 'true'
+        run: echo "CODECOV_TOKEN is not available to this run; coverage upload skipped."
