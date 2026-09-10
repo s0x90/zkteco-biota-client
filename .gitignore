@@ -1,0 +1,12 @@
+# Binaries and test artifacts
+*.exe
+*.test
+*.out
+coverage.*
+/bin/
+/dist/
+
+# Editor and OS files
+.idea/
+.vscode/
+.DS_Store

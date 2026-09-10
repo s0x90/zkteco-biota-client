@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go: ["1.24", "stable"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -race -count=1 -cover ./...
+      - name: Verify zero dependencies
+        run: |
+          if [ -f go.sum ] && [ -s go.sum ]; then
+            echo "go.sum is not empty: the client must stay dependency free" >&2
+            exit 1
+          fi
+          test "$(go list -m all)" = "github.com/s0x90/zkteco-biota-client"
