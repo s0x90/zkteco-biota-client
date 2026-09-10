@@ -29,29 +29,18 @@ jobs:
   gate:
     uses: ./.github/workflows/gate.yml
 
+  # Runs on the Go version declared in go.mod; see the setup-go action.
   test:
-    name: Test (Go ${{ matrix.go }})
+    name: Test
     needs: gate
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        # Current release, which is also the floor declared in go.mod. Add
-        # older entries here if the floor is ever lowered again.
-        go: ["1.26.x"]
-        include:
-          - go: "1.26.x"
-            coverage: true
-
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Set up Go
         uses: ./.github/actions/setup-go
-        with:
-          go-version: ${{ matrix.go }}
 
       - name: Vet
         run: go vet ./...
@@ -79,7 +68,6 @@ jobs:
         run: TZ=America/Los_Angeles go test -count=1 ./...
 
       - name: Keep coverage profile
-        if: matrix.coverage
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage
