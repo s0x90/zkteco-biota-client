@@ -223,6 +223,52 @@ func TestEmployeeExtraFields(t *testing.T) {
 	}
 }
 
+// TestEmployeeLegacyShape decodes an employee as returned by BioTime 8.x,
+// where the attendance flags are top level and the record carries the
+// self-service password hash.
+func TestEmployeeLegacyShape(t *testing.T) {
+	SetLocation(time.UTC)
+	t.Cleanup(func() { SetLocation(nil) })
+
+	in := `{
+		"id": 4, "emp_code": "1", "first_name": "admin", "last_name": null, "nickname": null,
+		"device_password": "441820", "card_no": null,
+		"department": {"id": 1, "dept_code": "1", "dept_name": "Workshop"}, "position": null,
+		"hire_date": "2025-11-13", "gender": null, "birthday": null, "verify_mode": 0, "emp_type": null,
+		"enroll_sn": "NYU7251601121", "enable_att": true, "enable_overtime": false, "enable_holiday": true,
+		"dev_privilege": 14, "self_password": "pbkdf2_sha256$36000$salt$hash", "flow_role": [],
+		"area": [{"id": 2, "area_code": "2", "area_name": "A"}, {"id": 3, "area_code": "3", "area_name": "B"}],
+		"app_status": 0, "app_role": 1, "update_time": "2026-05-22 11:33:11",
+		"fingerprint": "-", "face": "-", "palm": "-", "vl_face": 1
+	}`
+	var e Employee
+	if err := json.Unmarshal([]byte(in), &e); err != nil {
+		t.Fatal(err)
+	}
+	if e.ID != 4 || e.LastName != "" || e.EmpType != nil || e.DevPrivilege != 14 || len(e.Area) != 2 {
+		t.Errorf("core: %+v", e)
+	}
+	if e.EnableAtt == nil || !*e.EnableAtt || e.EnableOvertime == nil || *e.EnableOvertime || e.EnableHoliday == nil || !*e.EnableHoliday {
+		t.Errorf("attendance flags: %v %v %v", e.EnableAtt, e.EnableOvertime, e.EnableHoliday)
+	}
+	if e.AttEmployee != nil {
+		t.Errorf("attemployee should be absent on 8.x, got %+v", e.AttEmployee)
+	}
+	if e.VLFace != "1" || e.Face != "-" {
+		t.Errorf("biometric summaries: vl_face %q face %q", e.VLFace, e.Face)
+	}
+	if e.Extra != nil {
+		t.Errorf("password hash or other members leaked into Extra: %v", e.Extra)
+	}
+
+	var reencoded map[string]json.RawMessage
+	b, _ := json.Marshal(e)
+	_ = json.Unmarshal(b, &reencoded)
+	if _, ok := reencoded["self_password"]; ok {
+		t.Error("self_password re-encoded")
+	}
+}
+
 func TestEmployeeParamsJSON(t *testing.T) {
 	// NewDate takes the calendar date in Location(); pin it so the expected
 	// value does not depend on where the test runs.

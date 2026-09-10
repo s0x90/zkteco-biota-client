@@ -218,6 +218,38 @@ func TestLoginJWTScheme(t *testing.T) {
 	}
 }
 
+func TestAcceptLanguage(t *testing.T) {
+	f, srv := newFakeServer(t, Version8, AuthJWT)
+	f.handler = func(w http.ResponseWriter, r *http.Request) { f.page(w, 0, "") }
+
+	c := newTestClient(t, srv, WithAuthScheme(AuthJWT))
+	if _, err := c.Employees.List(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	// The login request and the API request both carry the default.
+	for _, r := range f.requests {
+		if got := r.Header.Get("Accept-Language"); got != "en" {
+			t.Errorf("%s Accept-Language %q", r.URL.Path, got)
+		}
+	}
+
+	c = newTestClient(t, srv, WithAuthScheme(AuthJWT), WithLanguage("ru"))
+	if _, err := c.Employees.List(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.lastRequest().Header.Get("Accept-Language"); got != "ru" {
+		t.Errorf("Accept-Language %q", got)
+	}
+
+	c = newTestClient(t, srv, WithAuthScheme(AuthJWT), WithLanguage(""))
+	if _, err := c.Employees.List(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, set := f.lastRequest().Header["Accept-Language"]; set {
+		t.Error("Accept-Language sent although disabled")
+	}
+}
+
 func TestLoginFailure(t *testing.T) {
 	_, srv := newFakeServer(t, Version9, AuthToken)
 	c := newTestClient(t, srv, WithCredentials("admin", "wrong"))
@@ -327,7 +359,7 @@ func TestPaginationLegacy(t *testing.T) {
 	c := newTestClient(t, srv, WithVersion(Version8), WithAuthScheme(AuthJWT))
 
 	page, err := c.Employees.List(t.Context(), &EmployeeFilter{
-		ListOptions: ListOptions{PageSize: 2, Ordering: "-id"},
+		ListOptions: ListOptions{PageSize: 2, Ordering: "-id", Search: "harry"},
 		Department:  3,
 		AppStatus:   new(0),
 		EmpCode:     "7",
@@ -339,7 +371,7 @@ func TestPaginationLegacy(t *testing.T) {
 		t.Errorf("%+v", page)
 	}
 	q := f.lastQuery()
-	if q.Get("page_size") != "2" || q.Has("limit") || q.Get("ordering") != "-id" || q.Get("department") != "3" || q.Get("app_status") != "0" || q.Get("emp_code") != "7" {
+	if q.Get("page_size") != "2" || q.Has("limit") || q.Get("ordering") != "-id" || q.Get("search") != "harry" || q.Get("department") != "3" || q.Get("app_status") != "0" || q.Get("emp_code") != "7" {
 		t.Errorf("query %v", q)
 	}
 
@@ -386,7 +418,7 @@ func TestPaginationModernAndEnvelopeError(t *testing.T) {
 	}
 	c := newTestClient(t, srv)
 
-	page, err := c.Terminals.List(t.Context(), &TerminalFilter{ListOptions: ListOptions{PageSize: 2}, SN: "A", Area: 9})
+	page, err := c.Terminals.List(t.Context(), &TerminalFilter{ListOptions: ListOptions{PageSize: 2}, SN: "A", Area: 9, IPAddress: "10.0.0.1", State: new(1)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +426,7 @@ func TestPaginationModernAndEnvelopeError(t *testing.T) {
 		t.Errorf("%+v", page)
 	}
 	q := f.lastQuery()
-	if q.Get("limit") != "2" || q.Has("page_size") || q.Get("sn") != "A" || q.Get("area") != "9" {
+	if q.Get("limit") != "2" || q.Has("page_size") || q.Get("sn") != "A" || q.Get("area") != "9" || q.Get("ip_address") != "10.0.0.1" || q.Get("state") != "1" || q.Has("search") {
 		t.Errorf("query %v", q)
 	}
 
@@ -560,7 +592,7 @@ func TestTransactionsFilterAndDecoding(t *testing.T) {
 
 	start := time.Date(2019, 3, 1, 0, 0, 0, 0, time.UTC)
 	page, err := c.Transactions.List(t.Context(), &TransactionFilter{
-		EmpCode: "1", TerminalSN: "SN", StartTime: start, EndTime: start.Add(24 * time.Hour),
+		EmpCode: "1", TerminalSN: "SN", TerminalAlias: "Gate", StartTime: start, EndTime: start.Add(24 * time.Hour),
 		ListOptions: ListOptions{Ordering: "punch_time"},
 	})
 	if err != nil {
@@ -570,7 +602,7 @@ func TestTransactionsFilterAndDecoding(t *testing.T) {
 	if q.Get("start_time") != "2019-03-01 03:00:00" || q.Get("end_time") != "2019-03-02 03:00:00" {
 		t.Errorf("time filters %v", q)
 	}
-	if q.Get("emp_code") != "1" || q.Get("terminal_sn") != "SN" || q.Get("ordering") != "punch_time" {
+	if q.Get("emp_code") != "1" || q.Get("terminal_sn") != "SN" || q.Get("terminal_alias") != "Gate" || q.Get("ordering") != "punch_time" {
 		t.Errorf("query %v", q)
 	}
 

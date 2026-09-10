@@ -7,10 +7,10 @@ It supports both server generations:
 
 | | BioTime 8.x (legacy) | ZKBio Time 9.0+ |
 |---|---|---|
-| Docs | `http://<server>/api/docs/` | *ZKBio Time 9.0 API User Manual* |
+| Docs | `http://<server>/api/personnel_docs/`, `/api/iclock_docs/`, `/api/att_docs/` (login required; `/api/docs/` lists only the auth endpoints) | *ZKBio Time 9.0 API User Manual* |
 | Select with | `biotime.WithVersion(biotime.Version8)` | `biotime.WithVersion(biotime.Version9)` (default) |
 | Page size parameter | `page_size` | `limit` |
-| List envelope | `{count,next,previous,results}` | `{count,next,previous,code,msg,data}` |
+| List envelope | `{count,next,previous,results}`; later 8.x builds already use the 9.0 shape | `{count,next,previous,code,msg,data}` |
 | Auth | `/jwt-api-token-auth/` (`Authorization: JWT …`) or `/api-token-auth/` (`Authorization: Token …`) | `/api-token-auth/` (`Authorization: Token …`) |
 
 The differences are handled inside the client: list pages decode either
@@ -81,6 +81,10 @@ which keeps long-running programs working across JWT expiry. Call
 | `client.Terminals` | `/iclock/api/terminals/` | `List`, `All`, `Get` |
 | `client.Transactions` | `/iclock/api/transactions/` | `List`, `All`, `Get` |
 
+The typed filter fields match exactly (`FirstName: "adm"` finds nobody);
+`ListOptions.Search` sends the server's free-text `search` parameter, and the
+`_icontains` variants can be passed through `Params`.
+
 `List` returns one `Page[T]` (with `Count` and `HasNext()`); `All` returns an
 `iter.Seq2[T, error]` that follows the server's `next` links on demand and
 stops when you `break`. Only the query parameters of `next` are used, never
@@ -110,7 +114,9 @@ returned in `Employee.Extra` as raw JSON.
 
 Endpoints the package does not model (schedules, manual logs, device
 commands, …) are reachable with `client.Do`, `client.Get` and `client.Post`,
-which handle authentication, JSON encoding and error mapping:
+which handle authentication, JSON encoding and error mapping. Route names
+differ between generations for some of them: manual logs live at
+`/att/api/manualLogs/` on 9.0 and at `/att/api/manuallogs/` on 8.x.
 
 ```go
 var out map[string]any
@@ -170,6 +176,7 @@ already been yielded, so a consumer that writes as it reads should dedupe on
 | `WithMaxBodySize(n)` | cap on buffered response and reader request bodies (32 MiB) |
 | `WithLogger(*slog.Logger)` | debug-log every request (never logs tokens or passwords) |
 | `WithUserAgent(s)` | custom `User-Agent` |
+| `WithLanguage(tag)` | `Accept-Language` for server error messages (default `en`; the server otherwise answers in its configured locale) |
 | `WithPageSizeParam(name)` | override the page size parameter for non-standard servers |
 
 ## CI and the self-hosted runner
@@ -203,6 +210,30 @@ from a live server:
 BIOTIME_URL=http://192.168.0.27:8080 BIOTIME_USER=admin BIOTIME_PASS=secret \
   go run ./examples/basic -version 8 -jwt -since 24h
 ```
+
+## Notes on 8.x servers
+
+Verified against a BioTime 8.x installation (Python 2.7, Django REST
+framework):
+
+- `limit` is ignored; only `page_size` changes the page size, and the server
+  honours large values (5000 punches in one page). `WithVersion(Version8)`
+  selects `page_size`.
+- The `next` links carry the server's internal address; the client uses only
+  their query string.
+- Employees carry the attendance flags as top-level `enable_att`,
+  `enable_overtime` and `enable_holiday` (`Employee.EnableAtt` etc.) and the
+  self-service password hash in `self_password`, which the client drops.
+- `first_name` is not required on create; `emp_code`, `department` and `area`
+  are.
+- Transactions and terminals accept `POST`, `PATCH` and `DELETE`; the
+  services stay read-only, use `client.Do` for writes.
+- `start_time`/`end_time` accept a date or a date-time; an unparsable value
+  yields an empty result rather than an error.
+- Unknown query parameters and unknown `ordering` fields are silently
+  ignored.
+- `GET /att/api/manuallogs/` answers 500 on the tested build; only `POST`
+  works.
 
 ## Notes on the 9.0 manual
 

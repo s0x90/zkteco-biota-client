@@ -178,6 +178,19 @@ func WithUserAgent(ua string) Option {
 	}
 }
 
+// WithLanguage sets the Accept-Language header sent with every request. The
+// server localizes its error messages ("detail", field errors) to the
+// negotiated language and falls back to the language configured in its
+// settings, which need not be English. The default is "en", so that
+// [Error.Message] and [Error.Fields] are predictable regardless of the
+// server's locale; pass "" to send no header and get the server's default.
+func WithLanguage(tag string) Option {
+	return func(c *Client) error {
+		c.language = tag
+		return nil
+	}
+}
+
 // WithLogger enables debug logging of requests and responses through the
 // given [slog.Logger]. Credentials and tokens are never logged.
 func WithLogger(l *slog.Logger) Option {

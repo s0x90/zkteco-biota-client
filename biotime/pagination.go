@@ -31,6 +31,10 @@ type ListOptions struct {
 	// add it as a tiebreaker (e.g. "punch_time,id"), and bound the query to
 	// a closed range in the past.
 	Ordering string
+	// Search is a free-text term matched case-insensitively against the
+	// searchable fields of the resource (the "search" parameter). The typed
+	// filter fields, by contrast, match exactly.
+	Search string
 }
 
 func (o ListOptions) apply(q url.Values, pageSizeParam string) {
@@ -42,6 +46,9 @@ func (o ListOptions) apply(q url.Values, pageSizeParam string) {
 	}
 	if o.Ordering != "" {
 		q.Set("ordering", o.Ordering)
+	}
+	if o.Search != "" {
+		q.Set("search", o.Search)
 	}
 }
 
