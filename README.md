@@ -186,11 +186,13 @@ registered to this repository, so three things are settings, not YAML:
 - **Dependabot bumps** run only after a maintainer has read the release notes
   and added the `ci-approved` label. Create that label once.
 - **Coverage upload** runs only when the repository variable
-  `CODECOV_ENABLED` is `true` and the `CODECOV_TOKEN` secret is set.
+  `CODECOV_ENABLED` is `true` and the `CODECOV_TOKEN` secret is set. Codecov
+  refuses connections from some networks outright (HTTP 403 from
+  `cli.codecov.io` and `api.codecov.io`); check both from the runner before
+  enabling it, because there is no workaround inside the workflow.
 
 The runner needs a C compiler for `go test -race` and network access to the
-Go module proxy, the Go download server, GitHub's artifact storage and, if
-enabled, codecov.io.
+Go module proxy, the Go download server and GitHub's artifact storage.
 
 ## Example program
 
