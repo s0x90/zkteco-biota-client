@@ -37,8 +37,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The floor declared in go.mod and the current release.
-        go: ["1.24", "1.26.x"]
+        # Current release, which is also the floor declared in go.mod. Add
+        # older entries here if the floor is ever lowered again.
+        go: ["1.26.x"]
         include:
           - go: "1.26.x"
             coverage: true

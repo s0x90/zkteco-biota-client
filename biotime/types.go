@@ -329,10 +329,6 @@ func (r *Ref[T]) UnmarshalJSON(b []byte) error {
 	}
 }
 
-// Ptr returns a pointer to v. It is a convenience for populating the
-// optional pointer fields of the *Params types.
-func Ptr[T any](v T) *T { return &v }
-
 // knownKeys caches the set of JSON keys declared by a struct type.
 var knownKeys sync.Map // reflect.Type -> map[string]struct{}
 
@@ -345,8 +341,7 @@ func jsonKeys(t reflect.Type) map[string]struct{} {
 	keys := make(map[string]struct{})
 	var walk func(reflect.Type)
 	walk = func(t reflect.Type) {
-		for i := range t.NumField() {
-			f := t.Field(i)
+		for f := range t.Fields() {
 			tag := f.Tag.Get("json")
 			if tag == "-" {
 				continue

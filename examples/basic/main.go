@@ -96,8 +96,7 @@ func run(version int, jwt bool, since time.Duration, debug bool) error {
 	var n int
 	for tx, err := range client.Transactions.All(ctx, filter) {
 		if err != nil {
-			var apiErr *biotime.Error
-			if errors.As(err, &apiErr) {
+			if apiErr, ok := errors.AsType[*biotime.Error](err); ok {
 				return fmt.Errorf("server rejected the request: %w", apiErr)
 			}
 			return err

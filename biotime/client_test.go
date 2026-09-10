@@ -222,8 +222,8 @@ func TestLoginFailure(t *testing.T) {
 	_, srv := newFakeServer(t, Version9, AuthToken)
 	c := newTestClient(t, srv, WithCredentials("admin", "wrong"))
 	_, err := c.Employees.List(t.Context(), nil)
-	var apiErr *Error
-	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest || !errors.Is(err, ErrValidation) || !errors.Is(err, ErrUnauthorized) {
+	apiErr, ok := errors.AsType[*Error](err)
+	if !ok || apiErr.StatusCode != http.StatusBadRequest || !errors.Is(err, ErrValidation) || !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("got %v", err)
 	}
 	if !strings.Contains(err.Error(), "Unable to log in") || strings.Count(err.Error(), "biotime:") != 1 {
@@ -294,13 +294,11 @@ func TestConcurrentLoginHappensOnce(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if _, err := c.Positions.List(t.Context(), nil); err != nil {
 				t.Error(err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if f.logins != 1 {
@@ -331,7 +329,7 @@ func TestPaginationLegacy(t *testing.T) {
 	page, err := c.Employees.List(t.Context(), &EmployeeFilter{
 		ListOptions: ListOptions{PageSize: 2, Ordering: "-id"},
 		Department:  3,
-		AppStatus:   Ptr(0),
+		AppStatus:   new(0),
 		EmpCode:     "7",
 	})
 	if err != nil {
@@ -406,8 +404,8 @@ func TestPaginationModernAndEnvelopeError(t *testing.T) {
 	}
 
 	_, err = c.Terminals.List(t.Context(), &TerminalFilter{ListOptions: ListOptions{Page: 9}})
-	var apiErr *Error
-	if !errors.As(err, &apiErr) || apiErr.Code != 2 || apiErr.Message != "page out of range" || apiErr.StatusCode != http.StatusOK {
+	apiErr, ok := errors.AsType[*Error](err)
+	if !ok || apiErr.Code != 2 || apiErr.Message != "page out of range" || apiErr.StatusCode != http.StatusOK {
 		t.Fatalf("got %v", err)
 	}
 
@@ -467,7 +465,7 @@ func TestCRUD(t *testing.T) {
 	ctx := t.Context()
 
 	created, err := c.Employees.Create(ctx, &EmployeeParams{
-		EmpCode: Ptr("employee333"), FirstName: Ptr("emp3"), Department: Ptr(1), Area: []int{1},
+		EmpCode: new("employee333"), FirstName: new("emp3"), Department: new(1), Area: []int{1},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -479,9 +477,9 @@ func TestCRUD(t *testing.T) {
 		t.Errorf("content type %q", ct)
 	}
 
-	_, err = c.Employees.Create(ctx, &EmployeeParams{FirstName: Ptr("x")})
-	var apiErr *Error
-	if !errors.As(err, &apiErr) || !errors.Is(err, ErrValidation) {
+	_, err = c.Employees.Create(ctx, &EmployeeParams{FirstName: new("x")})
+	apiErr, ok := errors.AsType[*Error](err)
+	if !ok || !errors.Is(err, ErrValidation) {
 		t.Fatalf("got %v", err)
 	}
 	if len(apiErr.Fields) != 2 || apiErr.Fields["area"][0] != "This list may not be empty." {
@@ -496,7 +494,7 @@ func TestCRUD(t *testing.T) {
 		t.Fatalf("%+v %v", got, err)
 	}
 
-	updated, err := c.Employees.Update(ctx, 4144, &EmployeeParams{CardNo: Ptr("5659812")})
+	updated, err := c.Employees.Update(ctx, 4144, &EmployeeParams{CardNo: new("5659812")})
 	if err != nil || updated.CardNo != "5659812" {
 		t.Fatalf("%+v %v", updated, err)
 	}
@@ -684,9 +682,8 @@ func TestRedirectIsAnError(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c, _ := New(srv.URL, WithToken("tok"))
-	emp, err := c.Employees.Create(t.Context(), &EmployeeParams{EmpCode: Ptr("x")})
-	var apiErr *Error
-	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusMovedPermanently || emp != nil {
+	emp, err := c.Employees.Create(t.Context(), &EmployeeParams{EmpCode: new("x")})
+	if apiErr, ok := errors.AsType[*Error](err); !ok || apiErr.StatusCode != http.StatusMovedPermanently || emp != nil {
 		t.Fatalf("got %+v, %v", emp, err)
 	}
 }

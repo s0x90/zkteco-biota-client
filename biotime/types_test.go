@@ -230,9 +230,9 @@ func TestEmployeeParamsJSON(t *testing.T) {
 	t.Cleanup(func() { SetLocation(nil) })
 
 	p := EmployeeParams{
-		EmpCode:    Ptr("employee333"),
-		FirstName:  Ptr("emp3"),
-		Department: Ptr(1),
+		EmpCode:    new("employee333"),
+		FirstName:  new("emp3"),
+		Department: new(1),
 		Area:       []int{1},
 		HireDate:   NewDate(time.Date(2024, 6, 26, 0, 0, 0, 0, time.UTC)),
 		Extra:      map[string]any{"Passport": "AB123", "emp_code": "ignored"},

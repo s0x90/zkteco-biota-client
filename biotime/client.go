@@ -148,8 +148,7 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 		Token string `json:"token"`
 	}
 	if err := c.request(ctx, http.MethodPost, c.scheme.loginPath(), nil, c.creds, &resp, false); err != nil {
-		var apiErr *Error
-		if errors.As(err, &apiErr) {
+		if apiErr, ok := errors.AsType[*Error](err); ok {
 			c.log(ctx, "biotime: login rejected", "scheme", string(c.scheme), "status", apiErr.StatusCode)
 			apiErr.login = true
 		}

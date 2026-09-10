@@ -17,7 +17,7 @@ The differences are handled inside the client: list pages decode either
 envelope, related objects decode whether the server expands them or returns a
 bare id, and timestamps decode the server's naive `2006-01-02 15:04:05` format.
 
-Requires Go 1.24+. No third-party modules.
+Requires Go 1.26+. No third-party modules.
 
 ## Install
 
@@ -93,16 +93,16 @@ assignment, a nil one is omitted:
 
 ```go
 emp, err := client.Employees.Create(ctx, &biotime.EmployeeParams{
-	EmpCode:    biotime.Ptr("1042"),
-	FirstName:  biotime.Ptr("Harry"),
-	LastName:   biotime.Ptr("Potter"),
-	Department: biotime.Ptr(1),
+	EmpCode:    new("1042"),
+	FirstName:  new("Harry"),
+	LastName:   new("Potter"),
+	Department: new(1),
 	Area:       []int{1},
 	HireDate:   biotime.NewDate(time.Now()),
 	Extra:      map[string]any{"Passport": "AB123"}, // custom fields defined in the server UI
 })
 
-_, err = client.Employees.Update(ctx, emp.ID, &biotime.EmployeeParams{CardNo: biotime.Ptr("5659812")})
+_, err = client.Employees.Update(ctx, emp.ID, &biotime.EmployeeParams{CardNo: new("5659812")})
 ```
 
 Custom employee attributes that the administrator added in the server UI are
@@ -135,8 +135,7 @@ switch {
 case errors.Is(err, biotime.ErrNotFound):
 case errors.Is(err, biotime.ErrUnauthorized):
 case errors.Is(err, biotime.ErrValidation):
-	var apiErr *biotime.Error
-	errors.As(err, &apiErr)
+	apiErr, _ := errors.AsType[*biotime.Error](err)
 	fmt.Println(apiErr.Fields) // map[emp_code:[This field is required.]]
 }
 ```
