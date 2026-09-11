@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -29,28 +30,57 @@ var (
 	ErrUnsupportedField = errors.New("biotime: server ignored a request field")
 )
 
-// UnsupportedFieldError reports a write the server accepted while not
-// applying one of the requested fields. It matches [ErrUnsupportedField]
-// with [errors.Is]. Employee is the record as the server holds it after the
-// write; for a create it exists on the server, and correcting or removing
-// it is the caller's decision, the client never deletes on its own.
+// UnsupportedFieldError reports the outcome of a write the server accepted
+// whose requested fields could not all be confirmed on the record. Employee
+// is the record as the server holds it after the write; for a create it
+// exists on the server, and correcting or removing it is the caller's
+// decision, the client never deletes on its own.
+//
+// With Cause nil the verdict is definitive and the error matches
+// [ErrUnsupportedField] with [errors.Is]. With Cause set, the record could
+// not be read back and the fields are neither confirmed nor refuted; Cause
+// is reachable with [errors.Is] and [errors.As] through Unwrap, and the
+// right reaction is to read the record again, not to repeat the write.
 type UnsupportedFieldError struct {
-	// Field is the JSON name of the request member that was not applied.
+	// Field is the JSON name of the request member that was not applied;
+	// empty when Cause is set.
 	Field string
 	// Reason says why the client concluded so: "ignored by the server" when
 	// the record carries a different value, "not reported by the server"
-	// when the record does not carry the setting at all.
+	// when the record does not carry the setting at all, "unverified" when
+	// the read-back failed (see Cause), or "write response carried no id"
+	// when the record could not be identified for a read-back.
 	Reason   string
 	Employee *Employee
+	// Cause is the error of the read-back, if that is what failed.
+	Cause error
 }
 
 // Error implements the error interface.
 func (e *UnsupportedFieldError) Error() string {
-	return fmt.Sprintf("%v: %s %s (employee %d)", ErrUnsupportedField, e.Field, e.Reason, e.Employee.ID)
+	id := "unknown"
+	if e.Employee != nil {
+		id = strconv.Itoa(e.Employee.ID)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%v: %s (employee %s)", ErrUnsupportedField, e.Reason, id)
+	if e.Field != "" {
+		fmt.Fprintf(&b, " field %s", e.Field)
+	}
+	if e.Cause != nil {
+		fmt.Fprintf(&b, ": %v", e.Cause)
+	}
+	return b.String()
 }
 
-// Is reports whether target is [ErrUnsupportedField].
-func (e *UnsupportedFieldError) Is(target error) bool { return target == ErrUnsupportedField }
+// Is reports whether target is [ErrUnsupportedField]; only a definitive
+// verdict (Cause nil) matches.
+func (e *UnsupportedFieldError) Is(target error) bool {
+	return target == ErrUnsupportedField && e.Cause == nil
+}
+
+// Unwrap returns Cause.
+func (e *UnsupportedFieldError) Unwrap() error { return e.Cause }
 
 // Error describes a failed API call. It is returned for any non-2xx response
 // and for 9.0 list responses whose envelope carries a non-zero code.

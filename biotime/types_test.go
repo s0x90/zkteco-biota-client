@@ -297,6 +297,18 @@ func TestEmployeeLegacyShape(t *testing.T) {
 	if strings.Contains(jsonLog.String(), "441820") {
 		t.Errorf("device PIN leaked through the slog JSON handler: %s", jsonLog.String())
 	}
+	// A dump of the record cannot be fed back as a credential.
+	var roundTrip Employee
+	if err := json.Unmarshal(b, &roundTrip); err == nil || !strings.Contains(err.Error(), "placeholder") {
+		t.Errorf("redaction placeholder accepted as a value: %v", err)
+	}
+	var s Secret
+	if err := json.Unmarshal([]byte(`"441820"`), &s); err != nil || s.Value() != "441820" {
+		t.Errorf("real value rejected: %v", err)
+	}
+	if err := json.Unmarshal([]byte(`441820`), &s); err != nil || s.Value() != "441820" {
+		t.Errorf("numeric value rejected: %v", err)
+	}
 
 	var none Employee
 	if _, ok := none.AttendanceEnabled(); ok {

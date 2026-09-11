@@ -553,11 +553,14 @@ func TestEmployeeFlagWriteIsVerified(t *testing.T) {
 	// detail view report the attendance flag.
 	var mode atomic.Int32
 	const (
-		ignored     = iota // write response nested and unchanged, detail the same
-		echoed             // 8.x: write response carries the flag top level
-		silentOK           // 9.0: write response omits the flags, detail shows them applied
-		silentWrong        // 9.0: write response omits the flags, detail shows them unchanged
-		neverShown         // neither response carries the flags
+		ignored       = iota // write response nested and unchanged, detail the same
+		echoed               // 8.x: write response carries the flag top level
+		silentOK             // 9.0: write response omits the flags, detail shows them applied
+		silentWrong          // 9.0: write response omits the flags, detail shows them unchanged
+		neverShown           // neither response carries the flags
+		readBackFails        // write response omits the flags, detail answers 500
+		noID                 // write response carries no id at all
+		partialEcho          // write response echoes enable_att only, detail carries all
 	)
 	var gets atomic.Int32
 	f.handler = func(w http.ResponseWriter, r *http.Request) {
@@ -570,6 +573,11 @@ func TestEmployeeFlagWriteIsVerified(t *testing.T) {
 				fmt.Fprint(w, `{"id":7,"emp_code":"7","attemployee":{"id":7,"enable_attendance":false}}`)
 			case neverShown:
 				fmt.Fprint(w, `{"id":7,"emp_code":"7"}`)
+			case readBackFails:
+				w.WriteHeader(http.StatusInternalServerError)
+				fmt.Fprint(w, `{"detail":"boom"}`)
+			case partialEcho:
+				fmt.Fprint(w, `{"id":7,"emp_code":"7","enable_att":false,"enable_overtime":true,"enable_holiday":true}`)
 			default:
 				fmt.Fprint(w, `{"id":7,"emp_code":"7","attemployee":{"id":7,"enable_attendance":true}}`)
 			}
@@ -577,7 +585,11 @@ func TestEmployeeFlagWriteIsVerified(t *testing.T) {
 			switch m {
 			case echoed:
 				fmt.Fprint(w, `{"id":7,"emp_code":"7","enable_att":false}`)
-			case silentOK, silentWrong, neverShown:
+			case partialEcho:
+				fmt.Fprint(w, `{"id":7,"emp_code":"7","enable_att":false}`)
+			case noID:
+				fmt.Fprint(w, `{"emp_code":"7"}`)
+			case silentOK, silentWrong, neverShown, readBackFails:
 				fmt.Fprint(w, `{"id":7,"emp_code":"7","first_name":"x","area":[1]}`)
 			default:
 				fmt.Fprint(w, `{"id":7,"emp_code":"7","attemployee":{"id":7,"enable_attendance":true}}`)
@@ -631,11 +643,49 @@ func TestEmployeeFlagWriteIsVerified(t *testing.T) {
 		t.Errorf("never reported: %v", err)
 	}
 
+	// The read-back fails: no verdict, the record and the cause are both
+	// reachable, and the sentinel does not match.
+	mode.Store(readBackFails)
+	_, err = c.Employees.Create(ctx, params)
+	if !errors.As(err, &ufe) || ufe.Reason != "unverified" || ufe.Employee == nil || ufe.Employee.ID != 7 || ufe.Field != "" {
+		t.Fatalf("read-back failure: %v", err)
+	}
+	if errors.Is(err, ErrUnsupportedField) {
+		t.Error("an unverified write must not match ErrUnsupportedField")
+	}
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusInternalServerError {
+		t.Errorf("cause not reachable: %v", err)
+	}
+	if !strings.Contains(err.Error(), "unverified") || !strings.Contains(err.Error(), "employee 7") || !strings.Contains(err.Error(), "boom") {
+		t.Error(err)
+	}
+
+	// The write response carries no id: nothing to read back.
+	mode.Store(noID)
+	gets.Store(0)
+	if _, err := c.Employees.Create(ctx, params); !errors.As(err, &ufe) || ufe.Reason != "write response carried no id" || gets.Load() != 0 {
+		t.Errorf("no id: %v (gets %d)", err, gets.Load())
+	}
+
+	// One requested flag echoed, another not: the detail view is consulted
+	// for the missing one instead of reporting it as unsupported.
+	mode.Store(partialEcho)
+	gets.Store(0)
+	if e, err := c.Employees.Update(ctx, 7, &EmployeeParams{EnableAtt: new(false), EnableOvertime: new(true)}); err != nil || e == nil || gets.Load() != 1 {
+		t.Errorf("partial echo: %+v %v (gets %d)", e, err, gets.Load())
+	}
+
 	// Flags that were not requested are neither checked nor fetched.
 	mode.Store(neverShown)
 	gets.Store(0)
 	if _, err := c.Employees.Update(ctx, 7, &EmployeeParams{CardNo: new("1")}); err != nil || gets.Load() != 0 {
 		t.Errorf("unrelated update: %v (gets %d)", err, gets.Load())
+	}
+
+	// The error type is safe to format without a record.
+	if s := (&UnsupportedFieldError{Reason: "x"}).Error(); !strings.Contains(s, "employee unknown") {
+		t.Errorf("nil-record Error(): %q", s)
 	}
 }
 

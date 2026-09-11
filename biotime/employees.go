@@ -3,7 +3,6 @@ package biotime
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"iter"
 	"net/http"
 	"net/url"
@@ -290,24 +289,31 @@ func flagChecks(p *EmployeeParams) []flagCheck {
 }
 
 // verifyFlags checks that every attendance flag set in params is reflected
-// by the record. A write response that omits the settings altogether, as
-// the 9.0 create response does, proves nothing either way, so the record
-// is fetched once and judged on that. Three outcomes: the flag matches,
-// the flag differs (ignored by the server), or the record does not carry it
-// even on the detail view (not reported by the server).
+// by the record. A write response that omits a requested setting, as the
+// 9.0 create response does, proves nothing either way, so the record is
+// fetched once and judged on that. Outcomes: every flag matches; a flag
+// differs (ignored by the server); the record does not carry it even on
+// the detail view (not reported by the server); or the read-back itself
+// failed, which is reported with the cause and no verdict.
 func (s *EmployeeService) verifyFlags(ctx context.Context, params *EmployeeParams, e *Employee) error {
 	checks := flagChecks(params)
-	requested := false
+	needsFetch := false
 	for _, c := range checks {
-		requested = requested || c.want != nil
+		if c.want == nil {
+			continue
+		}
+		if _, ok := c.got(e); !ok {
+			needsFetch = true
+			break
+		}
 	}
-	if !requested {
-		return nil
-	}
-	if _, ok := e.AttendanceEnabled(); !ok {
+	if needsFetch {
+		if e.ID == 0 {
+			return &UnsupportedFieldError{Reason: "write response carried no id", Employee: e}
+		}
 		full, err := s.Get(ctx, e.ID)
 		if err != nil {
-			return fmt.Errorf("biotime: employee %d written, attendance flags unverified: %w", e.ID, err)
+			return &UnsupportedFieldError{Reason: "unverified", Employee: e, Cause: err}
 		}
 		e = full
 	}

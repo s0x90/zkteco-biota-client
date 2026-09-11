@@ -232,6 +232,12 @@ framework):
   The record also carries the self-service password hash, which the client
   drops, and the device PIN in clear text, which `Employee.DevicePassword`
   redacts in `fmt`, `slog` and JSON output (`Secret`, read with `Value()`).
+  A JSON dump of an `Employee` is therefore not a migration format: the
+  placeholder is rejected on decoding, so carry `DevicePassword.Value()`
+  explicitly when copying employees between servers. When the read-back
+  after a write fails, the error carries the record and the cause and does
+  not match `ErrUnsupportedField`; read the record again rather than
+  repeating the write.
 - `first_name` is not required on create; `emp_code`, `department` and `area`
   are.
 - Transactions and terminals accept `POST`, `PATCH` and `DELETE`; the

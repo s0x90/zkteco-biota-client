@@ -199,35 +199,45 @@ func (s *FlexString) UnmarshalJSON(b []byte) error {
 // String returns the underlying string.
 func (s FlexString) String() string { return string(s) }
 
+// redacted is what a [Secret] encodes as everywhere except [Secret.Value].
+const redacted = "[redacted]"
+
 // Secret is a credential the server returns in clear text, such as a device
 // PIN. It encodes as "[redacted]" with the fmt verbs, with [slog] and with
 // [encoding/json], so that neither a debug print nor a structured log line
 // holding the enclosing record leaks it. The records of this package are
-// read models, not a storage format; where the clear text is needed, read
-// it deliberately with [Secret.Value]. Decoding accepts the same inputs as
-// [FlexString].
+// read models, not a storage or migration format: a JSON dump of an
+// [Employee] does not carry the credential, and decoding the placeholder
+// back is an error rather than a value that could be written to a device.
+// Where the clear text is needed, read it deliberately with [Secret.Value].
+// Decoding accepts the same inputs as [FlexString].
 type Secret string
 
 // Value returns the clear-text credential.
 func (s Secret) Value() string { return string(s) }
 
 // String implements [fmt.Stringer] and redacts the value.
-func (s Secret) String() string { return "[redacted]" }
+func (s Secret) String() string { return redacted }
 
 // GoString implements [fmt.GoStringer] and redacts the value.
-func (s Secret) GoString() string { return "[redacted]" }
+func (s Secret) GoString() string { return redacted }
 
 // LogValue implements [slog.LogValuer] and redacts the value.
-func (s Secret) LogValue() slog.Value { return slog.StringValue("[redacted]") }
+func (s Secret) LogValue() slog.Value { return slog.StringValue(redacted) }
 
 // MarshalJSON implements [json.Marshaler] and redacts the value.
-func (s Secret) MarshalJSON() ([]byte, error) { return json.Marshal(s.String()) }
+func (s Secret) MarshalJSON() ([]byte, error) { return json.Marshal(redacted) }
 
-// UnmarshalJSON implements [json.Unmarshaler].
+// UnmarshalJSON implements [json.Unmarshaler]. The redaction placeholder is
+// rejected, so that a record serialized by this package cannot be fed back
+// as a credential.
 func (s *Secret) UnmarshalJSON(b []byte) error {
 	var f FlexString
 	if err := f.UnmarshalJSON(b); err != nil {
 		return err
+	}
+	if string(f) == redacted {
+		return fmt.Errorf("biotime: Secret: %q is the redaction placeholder, not a value; records serialized by this package do not carry credentials", redacted)
 	}
 	*s = Secret(f)
 	return nil
