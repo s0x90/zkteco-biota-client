@@ -23,12 +23,41 @@ var (
 	// ErrNoCredentials is returned when a request needs a token but neither
 	// [WithToken] nor [WithCredentials] were configured.
 	ErrNoCredentials = errors.New("biotime: no token or credentials configured")
-	// ErrUnsupportedField is matched by an [*UnsupportedFieldError]: the
-	// server accepted a write with 2xx but the record shows that a field of
-	// the request was not applied, which Django REST framework does silently
-	// for members it does not know.
+	// ErrUnsupportedField is matched by an [*UnsupportedFieldError] with a
+	// definitive verdict: the server accepted a write with 2xx but the
+	// record shows that a field of the request was not applied, which
+	// Django REST framework does silently for members it does not know.
 	ErrUnsupportedField = errors.New("biotime: server ignored a request field")
+	// ErrUnverified is matched by an [*UnsupportedFieldError] without a
+	// verdict: the server accepted the write, but the record could not be
+	// read back, so the requested fields are neither confirmed nor refuted.
+	// Read the record again; do not repeat the write.
+	ErrUnverified = errors.New("biotime: write accepted, fields unverified")
 )
+
+// FieldVerdict is the conclusion an [*UnsupportedFieldError] reports.
+type FieldVerdict string
+
+// Verdicts of the read-back after a write.
+const (
+	// VerdictIgnored: the record carries a different value than requested.
+	VerdictIgnored FieldVerdict = "ignored by the server"
+	// VerdictNotReported: the record does not carry the setting at all, not
+	// even on the detail view.
+	VerdictNotReported FieldVerdict = "not reported by the server"
+	// VerdictUnverified: the read-back failed; see
+	// [UnsupportedFieldError.Cause].
+	VerdictUnverified FieldVerdict = "unverified"
+	// VerdictNoID: the write response carried no identifier, so there was
+	// nothing to read back.
+	VerdictNoID FieldVerdict = "write response carried no id"
+)
+
+// definitive reports whether the verdict refutes the write, as opposed to
+// leaving it unknown.
+func (v FieldVerdict) definitive() bool {
+	return v == VerdictIgnored || v == VerdictNotReported
+}
 
 // UnsupportedFieldError reports the outcome of a write the server accepted
 // whose requested fields could not all be confirmed on the record. Employee
@@ -36,34 +65,35 @@ var (
 // exists on the server, and correcting or removing it is the caller's
 // decision, the client never deletes on its own.
 //
-// With Cause nil the verdict is definitive and the error matches
-// [ErrUnsupportedField] with [errors.Is]. With Cause set, the record could
-// not be read back and the fields are neither confirmed nor refuted; Cause
-// is reachable with [errors.Is] and [errors.As] through Unwrap, and the
-// right reaction is to read the record again, not to repeat the write.
+// A definitive verdict ([VerdictIgnored], [VerdictNotReported]) matches
+// [ErrUnsupportedField] with [errors.Is]. The others ([VerdictUnverified],
+// [VerdictNoID]) match [ErrUnverified]; the fields are then neither
+// confirmed nor refuted, Cause is reachable with [errors.Is] and
+// [errors.As] through Unwrap, and the right reaction is to read the record
+// again, not to repeat the write.
 type UnsupportedFieldError struct {
-	// Field is the JSON name of the request member that was not applied;
-	// empty when Cause is set.
+	// Field is the JSON name of the request member the verdict is about;
+	// empty when the verdict is not about a single field.
 	Field string
-	// Reason says why the client concluded so: "ignored by the server" when
-	// the record carries a different value, "not reported by the server"
-	// when the record does not carry the setting at all, "unverified" when
-	// the read-back failed (see Cause), or "write response carried no id"
-	// when the record could not be identified for a read-back.
-	Reason   string
+	// Reason is the verdict.
+	Reason   FieldVerdict
 	Employee *Employee
-	// Cause is the error of the read-back, if that is what failed.
+	// Cause is the error of the read-back, when that is what failed.
 	Cause error
 }
 
 // Error implements the error interface.
 func (e *UnsupportedFieldError) Error() string {
+	head := ErrUnsupportedField
+	if !e.Reason.definitive() {
+		head = ErrUnverified
+	}
 	id := "unknown"
 	if e.Employee != nil {
 		id = strconv.Itoa(e.Employee.ID)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%v: %s (employee %s)", ErrUnsupportedField, e.Reason, id)
+	fmt.Fprintf(&b, "%v: %s (employee %s)", head, e.Reason, id)
 	if e.Field != "" {
 		fmt.Fprintf(&b, " field %s", e.Field)
 	}
@@ -73,10 +103,17 @@ func (e *UnsupportedFieldError) Error() string {
 	return b.String()
 }
 
-// Is reports whether target is [ErrUnsupportedField]; only a definitive
-// verdict (Cause nil) matches.
+// Is reports whether target is the sentinel for the verdict:
+// [ErrUnsupportedField] for a definitive one, [ErrUnverified] otherwise.
 func (e *UnsupportedFieldError) Is(target error) bool {
-	return target == ErrUnsupportedField && e.Cause == nil
+	switch target {
+	case ErrUnsupportedField:
+		return e.Reason.definitive()
+	case ErrUnverified:
+		return !e.Reason.definitive()
+	default:
+		return false
+	}
 }
 
 // Unwrap returns Cause.

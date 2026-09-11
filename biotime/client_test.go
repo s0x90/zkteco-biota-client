@@ -608,7 +608,7 @@ func TestEmployeeFlagWriteIsVerified(t *testing.T) {
 	if e != nil || !errors.Is(err, ErrUnsupportedField) || !errors.As(err, &ufe) {
 		t.Fatalf("got %+v %v", e, err)
 	}
-	if ufe.Field != "enable_att" || ufe.Reason != "ignored by the server" || ufe.Employee == nil || ufe.Employee.ID != 7 {
+	if ufe.Field != "enable_att" || ufe.Reason != VerdictIgnored || ufe.Employee == nil || ufe.Employee.ID != 7 {
 		t.Errorf("%+v", ufe)
 	}
 	if !strings.Contains(err.Error(), "enable_att") || !strings.Contains(err.Error(), "employee 7") {
@@ -635,11 +635,11 @@ func TestEmployeeFlagWriteIsVerified(t *testing.T) {
 		t.Errorf("silent but applied: %+v %v (gets %d)", e, err, gets.Load())
 	}
 	mode.Store(silentWrong)
-	if _, err := c.Employees.Create(ctx, params); !errors.As(err, &ufe) || ufe.Reason != "ignored by the server" {
+	if _, err := c.Employees.Create(ctx, params); !errors.As(err, &ufe) || ufe.Reason != VerdictIgnored {
 		t.Errorf("silent and ignored: %v", err)
 	}
 	mode.Store(neverShown)
-	if _, err := c.Employees.Update(ctx, 7, params); !errors.As(err, &ufe) || ufe.Reason != "not reported by the server" {
+	if _, err := c.Employees.Update(ctx, 7, params); !errors.As(err, &ufe) || ufe.Reason != VerdictNotReported {
 		t.Errorf("never reported: %v", err)
 	}
 
@@ -647,11 +647,14 @@ func TestEmployeeFlagWriteIsVerified(t *testing.T) {
 	// reachable, and the sentinel does not match.
 	mode.Store(readBackFails)
 	_, err = c.Employees.Create(ctx, params)
-	if !errors.As(err, &ufe) || ufe.Reason != "unverified" || ufe.Employee == nil || ufe.Employee.ID != 7 || ufe.Field != "" {
+	if !errors.As(err, &ufe) || ufe.Reason != VerdictUnverified || ufe.Employee == nil || ufe.Employee.ID != 7 || ufe.Field != "" {
 		t.Fatalf("read-back failure: %v", err)
 	}
-	if errors.Is(err, ErrUnsupportedField) {
-		t.Error("an unverified write must not match ErrUnsupportedField")
+	if errors.Is(err, ErrUnsupportedField) || !errors.Is(err, ErrUnverified) {
+		t.Error("an unverified write must match ErrUnverified, not ErrUnsupportedField")
+	}
+	if !strings.HasPrefix(err.Error(), ErrUnverified.Error()) {
+		t.Errorf("message names the wrong state: %v", err)
 	}
 	var apiErr *Error
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusInternalServerError {
@@ -664,7 +667,7 @@ func TestEmployeeFlagWriteIsVerified(t *testing.T) {
 	// The write response carries no id: nothing to read back.
 	mode.Store(noID)
 	gets.Store(0)
-	if _, err := c.Employees.Create(ctx, params); !errors.As(err, &ufe) || ufe.Reason != "write response carried no id" || gets.Load() != 0 {
+	if _, err := c.Employees.Create(ctx, params); !errors.As(err, &ufe) || ufe.Reason != VerdictNoID || gets.Load() != 0 || !errors.Is(err, ErrUnverified) || errors.Is(err, ErrUnsupportedField) {
 		t.Errorf("no id: %v (gets %d)", err, gets.Load())
 	}
 
@@ -684,7 +687,7 @@ func TestEmployeeFlagWriteIsVerified(t *testing.T) {
 	}
 
 	// The error type is safe to format without a record.
-	if s := (&UnsupportedFieldError{Reason: "x"}).Error(); !strings.Contains(s, "employee unknown") {
+	if s := (&UnsupportedFieldError{Reason: VerdictIgnored}).Error(); !strings.Contains(s, "employee unknown") || !strings.HasPrefix(s, ErrUnsupportedField.Error()) {
 		t.Errorf("nil-record Error(): %q", s)
 	}
 }

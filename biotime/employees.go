@@ -309,11 +309,11 @@ func (s *EmployeeService) verifyFlags(ctx context.Context, params *EmployeeParam
 	}
 	if needsFetch {
 		if e.ID == 0 {
-			return &UnsupportedFieldError{Reason: "write response carried no id", Employee: e}
+			return &UnsupportedFieldError{Reason: VerdictNoID, Employee: e}
 		}
 		full, err := s.Get(ctx, e.ID)
 		if err != nil {
-			return &UnsupportedFieldError{Reason: "unverified", Employee: e, Cause: err}
+			return &UnsupportedFieldError{Reason: VerdictUnverified, Employee: e, Cause: err}
 		}
 		e = full
 	}
@@ -324,9 +324,9 @@ func (s *EmployeeService) verifyFlags(ctx context.Context, params *EmployeeParam
 		got, ok := c.got(e)
 		switch {
 		case !ok:
-			return &UnsupportedFieldError{Field: c.name, Reason: "not reported by the server", Employee: e}
+			return &UnsupportedFieldError{Field: c.name, Reason: VerdictNotReported, Employee: e}
 		case got != *c.want:
-			return &UnsupportedFieldError{Field: c.name, Reason: "ignored by the server", Employee: e}
+			return &UnsupportedFieldError{Field: c.name, Reason: VerdictIgnored, Employee: e}
 		}
 	}
 	return nil
