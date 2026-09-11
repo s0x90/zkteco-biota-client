@@ -198,55 +198,37 @@ func TestEveryServiceReadPath(t *testing.T) {
 			"employees",
 			func() (int, error) { p, err := c.Employees.List(ctx, nil); return pageID(p, err) },
 			func() (int, error) { return firstID(Collect(c.Employees.All(ctx, nil))) },
-			func() (int, error) {
-				e, err := c.Employees.Get(ctx, 5)
-				return objID(e, err, func(e *Employee) int { return e.ID })
-			},
+			func() (int, error) { return idOf(c.Employees.Get(ctx, 5)) },
 		},
 		{
 			"departments",
 			func() (int, error) { p, err := c.Departments.List(ctx, nil); return pageID(p, err) },
 			func() (int, error) { return firstID(Collect(c.Departments.All(ctx, nil))) },
-			func() (int, error) {
-				d, err := c.Departments.Get(ctx, 5)
-				return objID(d, err, func(d *Department) int { return d.ID })
-			},
+			func() (int, error) { return idOf(c.Departments.Get(ctx, 5)) },
 		},
 		{
 			"areas",
 			func() (int, error) { p, err := c.Areas.List(ctx, nil); return pageID(p, err) },
 			func() (int, error) { return firstID(Collect(c.Areas.All(ctx, nil))) },
-			func() (int, error) {
-				a, err := c.Areas.Get(ctx, 5)
-				return objID(a, err, func(a *Area) int { return a.ID })
-			},
+			func() (int, error) { return idOf(c.Areas.Get(ctx, 5)) },
 		},
 		{
 			"positions",
 			func() (int, error) { p, err := c.Positions.List(ctx, nil); return pageID(p, err) },
 			func() (int, error) { return firstID(Collect(c.Positions.All(ctx, nil))) },
-			func() (int, error) {
-				p, err := c.Positions.Get(ctx, 5)
-				return objID(p, err, func(p *Position) int { return p.ID })
-			},
+			func() (int, error) { return idOf(c.Positions.Get(ctx, 5)) },
 		},
 		{
 			"terminals",
 			func() (int, error) { p, err := c.Terminals.List(ctx, nil); return pageID(p, err) },
 			func() (int, error) { return firstID(Collect(c.Terminals.All(ctx, nil))) },
-			func() (int, error) {
-				d, err := c.Terminals.Get(ctx, 5)
-				return objID(d, err, func(d *Terminal) int { return d.ID })
-			},
+			func() (int, error) { return idOf(c.Terminals.Get(ctx, 5)) },
 		},
 		{
 			"transactions",
 			func() (int, error) { p, err := c.Transactions.List(ctx, nil); return pageID(p, err) },
 			func() (int, error) { return firstID(Collect(c.Transactions.All(ctx, nil))) },
-			func() (int, error) {
-				x, err := c.Transactions.Get(ctx, 5)
-				return objID(x, err, func(x *Transaction) int { return x.ID })
-			},
+			func() (int, error) { return idOf(c.Transactions.Get(ctx, 5)) },
 		},
 	}
 	for _, p := range paths {
@@ -266,8 +248,8 @@ func pageID[T any](p *Page[T], err error) (int, error) {
 	return firstID(p.Results, nil)
 }
 
-// firstID returns the id of the first object of a slice, read through its
-// JSON encoding so that the helper does not need one accessor per type.
+// firstID returns the id of the only object of a slice, read through its
+// JSON encoding so that one helper serves every record type.
 func firstID[T any](items []T, err error) (int, error) {
 	if err != nil {
 		return 0, err
@@ -275,21 +257,25 @@ func firstID[T any](items []T, err error) (int, error) {
 	if len(items) != 1 {
 		return 0, fmt.Errorf("expected one object, got %d", len(items))
 	}
-	return objID(&items[0], nil, func(v *T) int {
-		b, _ := json.Marshal(v)
-		var head struct {
-			ID int `json:"id"`
-		}
-		_ = json.Unmarshal(b, &head)
-		return head.ID
-	})
+	b, err := json.Marshal(items[0])
+	if err != nil {
+		return 0, fmt.Errorf("encoding %T: %w", items[0], err)
+	}
+	var head struct {
+		ID int `json:"id"`
+	}
+	if err := json.Unmarshal(b, &head); err != nil {
+		return 0, fmt.Errorf("decoding id of %T: %w", items[0], err)
+	}
+	return head.ID, nil
 }
 
-func objID[T any](v *T, err error, id func(*T) int) (int, error) {
+// idOf returns the id of a single object, by the same route as firstID.
+func idOf[T any](v *T, err error) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return id(v), nil
+	return firstID([]T{*v}, nil)
 }
 
 func TestLoginTokenScheme(t *testing.T) {
