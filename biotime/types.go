@@ -200,10 +200,11 @@ func (s *FlexString) UnmarshalJSON(b []byte) error {
 func (s FlexString) String() string { return string(s) }
 
 // Secret is a credential the server returns in clear text, such as a device
-// PIN. It formats as "[redacted]" with the fmt verbs and with [slog], so
-// that a debug print of the enclosing record does not leak it; read it with
-// [Secret.Value]. JSON encoding writes the value, as the type exists to
-// protect logs, not data transfer. Decoding accepts the same inputs as
+// PIN. It encodes as "[redacted]" with the fmt verbs, with [slog] and with
+// [encoding/json], so that neither a debug print nor a structured log line
+// holding the enclosing record leaks it. The records of this package are
+// read models, not a storage format; where the clear text is needed, read
+// it deliberately with [Secret.Value]. Decoding accepts the same inputs as
 // [FlexString].
 type Secret string
 
@@ -218,6 +219,9 @@ func (s Secret) GoString() string { return "[redacted]" }
 
 // LogValue implements [slog.LogValuer] and redacts the value.
 func (s Secret) LogValue() slog.Value { return slog.StringValue("[redacted]") }
+
+// MarshalJSON implements [json.Marshaler] and redacts the value.
+func (s Secret) MarshalJSON() ([]byte, error) { return json.Marshal(s.String()) }
 
 // UnmarshalJSON implements [json.Unmarshaler].
 func (s *Secret) UnmarshalJSON(b []byte) error {

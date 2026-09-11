@@ -22,13 +22,35 @@ var (
 	// ErrNoCredentials is returned when a request needs a token but neither
 	// [WithToken] nor [WithCredentials] were configured.
 	ErrNoCredentials = errors.New("biotime: no token or credentials configured")
-	// ErrUnsupportedField is wrapped by the error returned when the server
-	// accepted a write with 2xx but the returned object shows that a field
-	// of the request was ignored, which Django REST framework does silently
-	// for members it does not know. The object was still written and is
-	// returned alongside the error.
+	// ErrUnsupportedField is matched by an [*UnsupportedFieldError]: the
+	// server accepted a write with 2xx but the record shows that a field of
+	// the request was not applied, which Django REST framework does silently
+	// for members it does not know.
 	ErrUnsupportedField = errors.New("biotime: server ignored a request field")
 )
+
+// UnsupportedFieldError reports a write the server accepted while not
+// applying one of the requested fields. It matches [ErrUnsupportedField]
+// with [errors.Is]. Employee is the record as the server holds it after the
+// write; for a create it exists on the server, and correcting or removing
+// it is the caller's decision, the client never deletes on its own.
+type UnsupportedFieldError struct {
+	// Field is the JSON name of the request member that was not applied.
+	Field string
+	// Reason says why the client concluded so: "ignored by the server" when
+	// the record carries a different value, "not reported by the server"
+	// when the record does not carry the setting at all.
+	Reason   string
+	Employee *Employee
+}
+
+// Error implements the error interface.
+func (e *UnsupportedFieldError) Error() string {
+	return fmt.Sprintf("%v: %s %s (employee %d)", ErrUnsupportedField, e.Field, e.Reason, e.Employee.ID)
+}
+
+// Is reports whether target is [ErrUnsupportedField].
+func (e *UnsupportedFieldError) Is(target error) bool { return target == ErrUnsupportedField }
 
 // Error describes a failed API call. It is returned for any non-2xx response
 // and for 9.0 list responses whose envelope carries a non-zero code.

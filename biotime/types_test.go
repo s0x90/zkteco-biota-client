@@ -289,8 +289,13 @@ func TestEmployeeLegacyShape(t *testing.T) {
 	if strings.Contains(logged.String(), "441820") || !strings.Contains(logged.String(), "redacted") {
 		t.Errorf("device PIN leaked through slog: %s", logged.String())
 	}
-	if !strings.Contains(string(b), `"device_password":"441820"`) {
-		t.Error("JSON encoding must keep the value")
+	if strings.Contains(string(b), "441820") || !strings.Contains(string(b), `"device_password":"[redacted]"`) {
+		t.Errorf("device PIN leaked through JSON: %s", b)
+	}
+	var jsonLog strings.Builder
+	slog.New(slog.NewJSONHandler(&jsonLog, nil)).Info("emp", "employee", e)
+	if strings.Contains(jsonLog.String(), "441820") {
+		t.Errorf("device PIN leaked through the slog JSON handler: %s", jsonLog.String())
 	}
 
 	var none Employee

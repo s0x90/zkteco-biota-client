@@ -549,41 +549,93 @@ func TestCRUD(t *testing.T) {
 
 func TestEmployeeFlagWriteIsVerified(t *testing.T) {
 	f, srv := newFakeServer(t, Version9, AuthToken)
-	var echo bool
+	// mode selects the server behavior: how the write response and the
+	// detail view report the attendance flag.
+	var mode atomic.Int32
+	const (
+		ignored     = iota // write response nested and unchanged, detail the same
+		echoed             // 8.x: write response carries the flag top level
+		silentOK           // 9.0: write response omits the flags, detail shows them applied
+		silentWrong        // 9.0: write response omits the flags, detail shows them unchanged
+		neverShown         // neither response carries the flags
+	)
+	var gets atomic.Int32
 	f.handler = func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPatch && r.Method != http.MethodPost {
+		m := int(mode.Load())
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/personnel/api/employees/7/":
+			gets.Add(1)
+			switch m {
+			case silentOK:
+				fmt.Fprint(w, `{"id":7,"emp_code":"7","attemployee":{"id":7,"enable_attendance":false}}`)
+			case neverShown:
+				fmt.Fprint(w, `{"id":7,"emp_code":"7"}`)
+			default:
+				fmt.Fprint(w, `{"id":7,"emp_code":"7","attemployee":{"id":7,"enable_attendance":true}}`)
+			}
+		case r.Method == http.MethodPatch || r.Method == http.MethodPost:
+			switch m {
+			case echoed:
+				fmt.Fprint(w, `{"id":7,"emp_code":"7","enable_att":false}`)
+			case silentOK, silentWrong, neverShown:
+				fmt.Fprint(w, `{"id":7,"emp_code":"7","first_name":"x","area":[1]}`)
+			default:
+				fmt.Fprint(w, `{"id":7,"emp_code":"7","attemployee":{"id":7,"enable_attendance":true}}`)
+			}
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		if echo {
-			// 8.x: the flag comes back top level.
-			fmt.Fprint(w, `{"id":7,"emp_code":"7","enable_att":false}`)
-			return
-		}
-		// 9.0: unknown members are dropped and the nested object is unchanged.
-		fmt.Fprint(w, `{"id":7,"emp_code":"7","attemployee":{"id":7,"enable_attendance":true}}`)
 	}
 	c := newTestClient(t, srv)
 	params := &EmployeeParams{EnableAtt: new(false)}
+	ctx := t.Context()
 
-	e, err := c.Employees.Update(t.Context(), 7, params)
-	if !errors.Is(err, ErrUnsupportedField) || !strings.Contains(err.Error(), "enable_att") {
-		t.Fatalf("got %v", err)
+	// Value present and different: ignored, no extra request.
+	e, err := c.Employees.Update(ctx, 7, params)
+	var ufe *UnsupportedFieldError
+	if e != nil || !errors.Is(err, ErrUnsupportedField) || !errors.As(err, &ufe) {
+		t.Fatalf("got %+v %v", e, err)
 	}
-	if e == nil || e.ID != 7 {
-		t.Errorf("written object must still be returned, got %+v", e)
+	if ufe.Field != "enable_att" || ufe.Reason != "ignored by the server" || ufe.Employee == nil || ufe.Employee.ID != 7 {
+		t.Errorf("%+v", ufe)
 	}
-	if _, err := c.Employees.Create(t.Context(), params); !errors.Is(err, ErrUnsupportedField) {
-		t.Errorf("create: got %v", err)
+	if !strings.Contains(err.Error(), "enable_att") || !strings.Contains(err.Error(), "employee 7") {
+		t.Error(err)
+	}
+	if gets.Load() != 0 {
+		t.Error("detail fetched although the write response carried the flag")
+	}
+	if e, err := c.Employees.Create(ctx, params); e != nil || !errors.As(err, &ufe) || ufe.Employee.ID != 7 {
+		t.Errorf("create: %+v %v", e, err)
 	}
 
-	echo = true
-	if e, err := c.Employees.Update(t.Context(), 7, params); err != nil || e.ID != 7 {
+	// 8.x echoes the flag in the write response.
+	mode.Store(echoed)
+	if e, err := c.Employees.Update(ctx, 7, params); err != nil || e.ID != 7 {
 		t.Errorf("echoed flag: %+v %v", e, err)
 	}
-	// Flags that were not requested are not checked.
-	if _, err := c.Employees.Update(t.Context(), 7, &EmployeeParams{CardNo: new("1")}); err != nil {
-		t.Errorf("unrelated update: %v", err)
+
+	// 9.0 omits the settings from the write response; the detail view decides.
+	mode.Store(silentOK)
+	gets.Store(0)
+	e, err = c.Employees.Create(ctx, params)
+	if err != nil || e == nil || e.ID != 7 || gets.Load() != 1 {
+		t.Errorf("silent but applied: %+v %v (gets %d)", e, err, gets.Load())
+	}
+	mode.Store(silentWrong)
+	if _, err := c.Employees.Create(ctx, params); !errors.As(err, &ufe) || ufe.Reason != "ignored by the server" {
+		t.Errorf("silent and ignored: %v", err)
+	}
+	mode.Store(neverShown)
+	if _, err := c.Employees.Update(ctx, 7, params); !errors.As(err, &ufe) || ufe.Reason != "not reported by the server" {
+		t.Errorf("never reported: %v", err)
+	}
+
+	// Flags that were not requested are neither checked nor fetched.
+	mode.Store(neverShown)
+	gets.Store(0)
+	if _, err := c.Employees.Update(ctx, 7, &EmployeeParams{CardNo: new("1")}); err != nil || gets.Load() != 0 {
+		t.Errorf("unrelated update: %v (gets %d)", err, gets.Load())
 	}
 }
 

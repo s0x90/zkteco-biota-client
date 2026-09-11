@@ -215,9 +215,8 @@ type EmployeeParams struct {
 	// EnableAtt, EnableOvertime and EnableHoliday are the attendance
 	// settings as 8.x accepts them. A server that does not know these
 	// members ignores them without complaint, so [EmployeeService.Create]
-	// and [EmployeeService.Update] compare the returned object with the
-	// request and report a mismatch with an error wrapping
-	// [ErrUnsupportedField].
+	// and [EmployeeService.Update] read the record back and report a
+	// mismatch with an [*UnsupportedFieldError].
 	EnableAtt      *bool `json:"enable_att,omitzero"`
 	EnableOvertime *bool `json:"enable_overtime,omitzero"`
 	EnableHoliday  *bool `json:"enable_holiday,omitzero"`
@@ -244,45 +243,84 @@ type EmployeeService struct {
 }
 
 // Create adds an employee. See [EmployeeParams] for the required fields.
-// When the server ignored one of the attendance flags, the created employee
-// is returned together with an error wrapping [ErrUnsupportedField].
+// When params set an attendance flag that the server did not apply, the
+// employee has nevertheless been created and the error is an
+// [*UnsupportedFieldError] carrying the record; the client does not delete
+// it.
 func (s *EmployeeService) Create(ctx context.Context, params *EmployeeParams) (*Employee, error) {
 	e, err := s.resource.Create(ctx, params)
 	if err != nil {
 		return nil, err
 	}
-	return e, verifyFlags(params, e)
+	if err := s.verifyFlags(ctx, params, e); err != nil {
+		return nil, err
+	}
+	return e, nil
 }
 
-// Update changes the provided fields of an employee (HTTP PATCH). When the
-// server ignored one of the attendance flags, the updated employee is
-// returned together with an error wrapping [ErrUnsupportedField].
+// Update changes the provided fields of an employee (HTTP PATCH). When
+// params set an attendance flag that the server did not apply, the other
+// fields have nevertheless been written and the error is an
+// [*UnsupportedFieldError] carrying the record.
 func (s *EmployeeService) Update(ctx context.Context, id int, params *EmployeeParams) (*Employee, error) {
 	e, err := s.resource.Update(ctx, id, params)
 	if err != nil {
 		return nil, err
 	}
-	return e, verifyFlags(params, e)
+	if err := s.verifyFlags(ctx, params, e); err != nil {
+		return nil, err
+	}
+	return e, nil
+}
+
+// flagCheck pairs a requested attendance flag with the accessor that reads
+// it back from a record.
+type flagCheck struct {
+	name string
+	want *bool
+	got  func(*Employee) (bool, bool)
+}
+
+func flagChecks(p *EmployeeParams) []flagCheck {
+	return []flagCheck{
+		{"enable_att", p.EnableAtt, (*Employee).AttendanceEnabled},
+		{"enable_overtime", p.EnableOvertime, (*Employee).OvertimeEnabled},
+		{"enable_holiday", p.EnableHoliday, (*Employee).HolidayEnabled},
+	}
 }
 
 // verifyFlags checks that every attendance flag set in params is reflected
-// by the object the server returned for the write.
-func verifyFlags(params *EmployeeParams, e *Employee) error {
-	checks := []struct {
-		name string
-		want *bool
-		got  func() (bool, bool)
-	}{
-		{"enable_att", params.EnableAtt, e.AttendanceEnabled},
-		{"enable_overtime", params.EnableOvertime, e.OvertimeEnabled},
-		{"enable_holiday", params.EnableHoliday, e.HolidayEnabled},
+// by the record. A write response that omits the settings altogether, as
+// the 9.0 create response does, proves nothing either way, so the record
+// is fetched once and judged on that. Three outcomes: the flag matches,
+// the flag differs (ignored by the server), or the record does not carry it
+// even on the detail view (not reported by the server).
+func (s *EmployeeService) verifyFlags(ctx context.Context, params *EmployeeParams, e *Employee) error {
+	checks := flagChecks(params)
+	requested := false
+	for _, c := range checks {
+		requested = requested || c.want != nil
+	}
+	if !requested {
+		return nil
+	}
+	if _, ok := e.AttendanceEnabled(); !ok {
+		full, err := s.Get(ctx, e.ID)
+		if err != nil {
+			return fmt.Errorf("biotime: employee %d written, attendance flags unverified: %w", e.ID, err)
+		}
+		e = full
 	}
 	for _, c := range checks {
 		if c.want == nil {
 			continue
 		}
-		if got, ok := c.got(); !ok || got != *c.want {
-			return fmt.Errorf("%w: %s", ErrUnsupportedField, c.name)
+		got, ok := c.got(e)
+		switch {
+		case !ok:
+			return &UnsupportedFieldError{Field: c.name, Reason: "not reported by the server", Employee: e}
+		case got != *c.want:
+			return &UnsupportedFieldError{Field: c.name, Reason: "ignored by the server", Employee: e}
 		}
 	}
 	return nil

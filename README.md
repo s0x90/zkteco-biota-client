@@ -224,12 +224,14 @@ framework):
 - Employees carry the attendance flags as top-level `enable_att`,
   `enable_overtime` and `enable_holiday`; read them with
   `Employee.AttendanceEnabled()` and friends, which also understand the 9.0
-  nested form. Writing them through `EmployeeParams` is verified against
-  the returned object, because a server that does not know the fields
-  ignores them silently; a mismatch is reported with `ErrUnsupportedField`.
+  nested form. Writing them through `EmployeeParams` is read back and
+  verified, because a server that does not know the fields ignores them
+  silently; a mismatch is reported as an `*UnsupportedFieldError` (matching
+  `ErrUnsupportedField`) that carries the written record, since on create
+  the employee exists by then and the client never deletes on its own.
   The record also carries the self-service password hash, which the client
   drops, and the device PIN in clear text, which `Employee.DevicePassword`
-  prints redacted (`Secret`).
+  redacts in `fmt`, `slog` and JSON output (`Secret`, read with `Value()`).
 - `first_name` is not required on create; `emp_code`, `department` and `area`
   are.
 - Transactions and terminals accept `POST`, `PATCH` and `DELETE`; the
