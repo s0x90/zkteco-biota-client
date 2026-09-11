@@ -168,6 +168,128 @@ func TestNewValidation(t *testing.T) {
 	if _, err := New("http://x", WithMaxBodySize(0)); err == nil {
 		t.Error("zero max response size accepted")
 	}
+	if _, err := New("http://x", WithHTTPClient(nil)); err == nil {
+		t.Error("nil http client accepted")
+	}
+}
+
+// TestEveryServiceReadPath drives List, All and Get of each service through
+// the fake server, so that the thin per-service wrappers are all exercised.
+func TestEveryServiceReadPath(t *testing.T) {
+	f, srv := newFakeServer(t, Version9, AuthToken)
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/5/") {
+			fmt.Fprint(w, `{"id":5}`)
+			return
+		}
+		f.page(w, 1, "", map[string]any{"id": 5})
+	}
+	c := newTestClient(t, srv)
+	ctx := t.Context()
+
+	type readPath struct {
+		name string
+		list func() (int, error)
+		all  func() (int, error)
+		get  func() (int, error)
+	}
+	paths := []readPath{
+		{
+			"employees",
+			func() (int, error) { p, err := c.Employees.List(ctx, nil); return pageID(p, err) },
+			func() (int, error) { return firstID(Collect(c.Employees.All(ctx, nil))) },
+			func() (int, error) {
+				e, err := c.Employees.Get(ctx, 5)
+				return objID(e, err, func(e *Employee) int { return e.ID })
+			},
+		},
+		{
+			"departments",
+			func() (int, error) { p, err := c.Departments.List(ctx, nil); return pageID(p, err) },
+			func() (int, error) { return firstID(Collect(c.Departments.All(ctx, nil))) },
+			func() (int, error) {
+				d, err := c.Departments.Get(ctx, 5)
+				return objID(d, err, func(d *Department) int { return d.ID })
+			},
+		},
+		{
+			"areas",
+			func() (int, error) { p, err := c.Areas.List(ctx, nil); return pageID(p, err) },
+			func() (int, error) { return firstID(Collect(c.Areas.All(ctx, nil))) },
+			func() (int, error) {
+				a, err := c.Areas.Get(ctx, 5)
+				return objID(a, err, func(a *Area) int { return a.ID })
+			},
+		},
+		{
+			"positions",
+			func() (int, error) { p, err := c.Positions.List(ctx, nil); return pageID(p, err) },
+			func() (int, error) { return firstID(Collect(c.Positions.All(ctx, nil))) },
+			func() (int, error) {
+				p, err := c.Positions.Get(ctx, 5)
+				return objID(p, err, func(p *Position) int { return p.ID })
+			},
+		},
+		{
+			"terminals",
+			func() (int, error) { p, err := c.Terminals.List(ctx, nil); return pageID(p, err) },
+			func() (int, error) { return firstID(Collect(c.Terminals.All(ctx, nil))) },
+			func() (int, error) {
+				d, err := c.Terminals.Get(ctx, 5)
+				return objID(d, err, func(d *Terminal) int { return d.ID })
+			},
+		},
+		{
+			"transactions",
+			func() (int, error) { p, err := c.Transactions.List(ctx, nil); return pageID(p, err) },
+			func() (int, error) { return firstID(Collect(c.Transactions.All(ctx, nil))) },
+			func() (int, error) {
+				x, err := c.Transactions.Get(ctx, 5)
+				return objID(x, err, func(x *Transaction) int { return x.ID })
+			},
+		},
+	}
+	for _, p := range paths {
+		for op, call := range map[string]func() (int, error){"List": p.list, "All": p.all, "Get": p.get} {
+			if id, err := call(); err != nil || id != 5 {
+				t.Errorf("%s.%s: id %d, err %v", p.name, op, id, err)
+			}
+		}
+	}
+}
+
+// pageID returns the id of the only object on a page.
+func pageID[T any](p *Page[T], err error) (int, error) {
+	if err != nil {
+		return 0, err
+	}
+	return firstID(p.Results, nil)
+}
+
+// firstID returns the id of the first object of a slice, read through its
+// JSON encoding so that the helper does not need one accessor per type.
+func firstID[T any](items []T, err error) (int, error) {
+	if err != nil {
+		return 0, err
+	}
+	if len(items) != 1 {
+		return 0, fmt.Errorf("expected one object, got %d", len(items))
+	}
+	return objID(&items[0], nil, func(v *T) int {
+		b, _ := json.Marshal(v)
+		var head struct {
+			ID int `json:"id"`
+		}
+		_ = json.Unmarshal(b, &head)
+		return head.ID
+	})
+}
+
+func objID[T any](v *T, err error, id func(*T) int) (int, error) {
+	if err != nil {
+		return 0, err
+	}
+	return id(v), nil
 }
 
 func TestLoginTokenScheme(t *testing.T) {
@@ -869,10 +991,18 @@ func TestRedirectIsAnError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c, _ := New(srv.URL, WithToken("tok"))
-	emp, err := c.Employees.Create(t.Context(), &EmployeeParams{EmpCode: new("x")})
-	if apiErr, ok := errors.AsType[*Error](err); !ok || apiErr.StatusCode != http.StatusMovedPermanently || emp != nil {
-		t.Fatalf("got %+v, %v", emp, err)
+	// The default client and a caller-supplied one configured as the
+	// WithHTTPClient documentation prescribes must behave the same.
+	custom := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	for name, opts := range map[string][]Option{
+		"default client": {WithToken("tok")},
+		"custom client":  {WithToken("tok"), WithHTTPClient(custom)},
+	} {
+		c, _ := New(srv.URL, opts...)
+		emp, err := c.Employees.Create(t.Context(), &EmployeeParams{EmpCode: new("x")})
+		if apiErr, ok := errors.AsType[*Error](err); !ok || apiErr.StatusCode != http.StatusMovedPermanently || emp != nil {
+			t.Fatalf("%s: got %+v, %v", name, emp, err)
+		}
 	}
 }
 

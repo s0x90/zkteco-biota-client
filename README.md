@@ -201,6 +201,10 @@ registered to this repository, so three things are settings, not YAML:
 The runner needs a C compiler for `go test -race` and network access to the
 Go module proxy, the Go download server and GitHub's artifact storage.
 
+The lint workflow also runs `deadcode -test ./...`. This module is a library,
+so reachability is judged from `examples/basic` and the tests: every exported
+function must be exercised by one of them, or the job fails.
+
 ## Example program
 
 `examples/basic` lists devices, departments, employees and recent punches
