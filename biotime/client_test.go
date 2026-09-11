@@ -168,6 +168,114 @@ func TestNewValidation(t *testing.T) {
 	if _, err := New("http://x", WithMaxBodySize(0)); err == nil {
 		t.Error("zero max response size accepted")
 	}
+	if _, err := New("http://x", WithHTTPClient(nil)); err == nil {
+		t.Error("nil http client accepted")
+	}
+}
+
+// TestEveryServiceReadPath drives List, All and Get of each service through
+// the fake server, so that the thin per-service wrappers are all exercised.
+func TestEveryServiceReadPath(t *testing.T) {
+	f, srv := newFakeServer(t, Version9, AuthToken)
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/5/") {
+			fmt.Fprint(w, `{"id":5}`)
+			return
+		}
+		f.page(w, 1, "", map[string]any{"id": 5})
+	}
+	c := newTestClient(t, srv)
+	ctx := t.Context()
+
+	type readPath struct {
+		name string
+		list func() (int, error)
+		all  func() (int, error)
+		get  func() (int, error)
+	}
+	paths := []readPath{
+		{
+			"employees",
+			func() (int, error) { p, err := c.Employees.List(ctx, nil); return pageID(p, err) },
+			func() (int, error) { return firstID(Collect(c.Employees.All(ctx, nil))) },
+			func() (int, error) { return idOf(c.Employees.Get(ctx, 5)) },
+		},
+		{
+			"departments",
+			func() (int, error) { p, err := c.Departments.List(ctx, nil); return pageID(p, err) },
+			func() (int, error) { return firstID(Collect(c.Departments.All(ctx, nil))) },
+			func() (int, error) { return idOf(c.Departments.Get(ctx, 5)) },
+		},
+		{
+			"areas",
+			func() (int, error) { p, err := c.Areas.List(ctx, nil); return pageID(p, err) },
+			func() (int, error) { return firstID(Collect(c.Areas.All(ctx, nil))) },
+			func() (int, error) { return idOf(c.Areas.Get(ctx, 5)) },
+		},
+		{
+			"positions",
+			func() (int, error) { p, err := c.Positions.List(ctx, nil); return pageID(p, err) },
+			func() (int, error) { return firstID(Collect(c.Positions.All(ctx, nil))) },
+			func() (int, error) { return idOf(c.Positions.Get(ctx, 5)) },
+		},
+		{
+			"terminals",
+			func() (int, error) { p, err := c.Terminals.List(ctx, nil); return pageID(p, err) },
+			func() (int, error) { return firstID(Collect(c.Terminals.All(ctx, nil))) },
+			func() (int, error) { return idOf(c.Terminals.Get(ctx, 5)) },
+		},
+		{
+			"transactions",
+			func() (int, error) { p, err := c.Transactions.List(ctx, nil); return pageID(p, err) },
+			func() (int, error) { return firstID(Collect(c.Transactions.All(ctx, nil))) },
+			func() (int, error) { return idOf(c.Transactions.Get(ctx, 5)) },
+		},
+	}
+	for _, p := range paths {
+		for op, call := range map[string]func() (int, error){"List": p.list, "All": p.all, "Get": p.get} {
+			if id, err := call(); err != nil || id != 5 {
+				t.Errorf("%s.%s: id %d, err %v", p.name, op, id, err)
+			}
+		}
+	}
+}
+
+// pageID returns the id of the only object on a page.
+func pageID[T any](p *Page[T], err error) (int, error) {
+	if err != nil {
+		return 0, err
+	}
+	return firstID(p.Results, nil)
+}
+
+// firstID returns the id of the only object of a slice, read through its
+// JSON encoding so that one helper serves every record type.
+func firstID[T any](items []T, err error) (int, error) {
+	if err != nil {
+		return 0, err
+	}
+	if len(items) != 1 {
+		return 0, fmt.Errorf("expected one object, got %d", len(items))
+	}
+	b, err := json.Marshal(items[0])
+	if err != nil {
+		return 0, fmt.Errorf("encoding %T: %w", items[0], err)
+	}
+	var head struct {
+		ID int `json:"id"`
+	}
+	if err := json.Unmarshal(b, &head); err != nil {
+		return 0, fmt.Errorf("decoding id of %T: %w", items[0], err)
+	}
+	return head.ID, nil
+}
+
+// idOf returns the id of a single object, by the same route as firstID.
+func idOf[T any](v *T, err error) (int, error) {
+	if err != nil {
+		return 0, err
+	}
+	return firstID([]T{*v}, nil)
 }
 
 func TestLoginTokenScheme(t *testing.T) {
@@ -215,6 +323,38 @@ func TestLoginJWTScheme(t *testing.T) {
 	}
 	if f.logins != 1 {
 		t.Errorf("logins %d", f.logins)
+	}
+}
+
+func TestAcceptLanguage(t *testing.T) {
+	f, srv := newFakeServer(t, Version8, AuthJWT)
+	f.handler = func(w http.ResponseWriter, r *http.Request) { f.page(w, 0, "") }
+
+	c := newTestClient(t, srv, WithAuthScheme(AuthJWT))
+	if _, err := c.Employees.List(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	// The login request and the API request both carry the default.
+	for _, r := range f.requests {
+		if got := r.Header.Get("Accept-Language"); got != "en" {
+			t.Errorf("%s Accept-Language %q", r.URL.Path, got)
+		}
+	}
+
+	c = newTestClient(t, srv, WithAuthScheme(AuthJWT), WithLanguage("ru"))
+	if _, err := c.Employees.List(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.lastRequest().Header.Get("Accept-Language"); got != "ru" {
+		t.Errorf("Accept-Language %q", got)
+	}
+
+	c = newTestClient(t, srv, WithAuthScheme(AuthJWT), WithLanguage(""))
+	if _, err := c.Employees.List(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, set := f.lastRequest().Header["Accept-Language"]; set {
+		t.Error("Accept-Language sent although disabled")
 	}
 }
 
@@ -327,7 +467,7 @@ func TestPaginationLegacy(t *testing.T) {
 	c := newTestClient(t, srv, WithVersion(Version8), WithAuthScheme(AuthJWT))
 
 	page, err := c.Employees.List(t.Context(), &EmployeeFilter{
-		ListOptions: ListOptions{PageSize: 2, Ordering: "-id"},
+		ListOptions: ListOptions{PageSize: 2, Ordering: "-id", Search: "harry"},
 		Department:  3,
 		AppStatus:   new(0),
 		EmpCode:     "7",
@@ -339,7 +479,7 @@ func TestPaginationLegacy(t *testing.T) {
 		t.Errorf("%+v", page)
 	}
 	q := f.lastQuery()
-	if q.Get("page_size") != "2" || q.Has("limit") || q.Get("ordering") != "-id" || q.Get("department") != "3" || q.Get("app_status") != "0" || q.Get("emp_code") != "7" {
+	if q.Get("page_size") != "2" || q.Has("limit") || q.Get("ordering") != "-id" || q.Get("search") != "harry" || q.Get("department") != "3" || q.Get("app_status") != "0" || q.Get("emp_code") != "7" {
 		t.Errorf("query %v", q)
 	}
 
@@ -386,7 +526,7 @@ func TestPaginationModernAndEnvelopeError(t *testing.T) {
 	}
 	c := newTestClient(t, srv)
 
-	page, err := c.Terminals.List(t.Context(), &TerminalFilter{ListOptions: ListOptions{PageSize: 2}, SN: "A", Area: 9})
+	page, err := c.Terminals.List(t.Context(), &TerminalFilter{ListOptions: ListOptions{PageSize: 2}, SN: "A", Area: 9, IPAddress: "10.0.0.1", State: new(1)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +534,7 @@ func TestPaginationModernAndEnvelopeError(t *testing.T) {
 		t.Errorf("%+v", page)
 	}
 	q := f.lastQuery()
-	if q.Get("limit") != "2" || q.Has("page_size") || q.Get("sn") != "A" || q.Get("area") != "9" {
+	if q.Get("limit") != "2" || q.Has("page_size") || q.Get("sn") != "A" || q.Get("area") != "9" || q.Get("ip_address") != "10.0.0.1" || q.Get("state") != "1" || q.Has("search") {
 		t.Errorf("query %v", q)
 	}
 
@@ -515,6 +655,162 @@ func TestCRUD(t *testing.T) {
 	}
 }
 
+func TestEmployeeFlagWriteIsVerified(t *testing.T) {
+	f, srv := newFakeServer(t, Version9, AuthToken)
+	// mode selects the server behavior: how the write response and the
+	// detail view report the attendance flag.
+	var mode atomic.Int32
+	const (
+		ignored       = iota // write response nested and unchanged, detail the same
+		echoed               // 8.x: write response carries the flag top level
+		silentOK             // 9.0: write response omits the flags, detail shows them applied
+		silentWrong          // 9.0: write response omits the flags, detail shows them unchanged
+		neverShown           // neither response carries the flags
+		readBackFails        // write response omits the flags, detail answers 500
+		noID                 // write response carries no id at all
+		partialEcho          // write response echoes enable_att only, detail carries all
+	)
+	var gets atomic.Int32
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		m := int(mode.Load())
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/personnel/api/employees/7/":
+			gets.Add(1)
+			switch m {
+			case silentOK:
+				fmt.Fprint(w, `{"id":7,"emp_code":"7","attemployee":{"id":7,"enable_attendance":false}}`)
+			case neverShown:
+				fmt.Fprint(w, `{"id":7,"emp_code":"7"}`)
+			case readBackFails:
+				w.WriteHeader(http.StatusInternalServerError)
+				fmt.Fprint(w, `{"detail":"boom"}`)
+			case partialEcho:
+				fmt.Fprint(w, `{"id":7,"emp_code":"7","enable_att":false,"enable_overtime":true,"enable_holiday":true}`)
+			default:
+				fmt.Fprint(w, `{"id":7,"emp_code":"7","attemployee":{"id":7,"enable_attendance":true}}`)
+			}
+		case r.Method == http.MethodPatch || r.Method == http.MethodPost:
+			switch m {
+			case echoed:
+				fmt.Fprint(w, `{"id":7,"emp_code":"7","enable_att":false}`)
+			case partialEcho:
+				fmt.Fprint(w, `{"id":7,"emp_code":"7","enable_att":false}`)
+			case noID:
+				fmt.Fprint(w, `{"emp_code":"7"}`)
+			case silentOK, silentWrong, neverShown, readBackFails:
+				fmt.Fprint(w, `{"id":7,"emp_code":"7","first_name":"x","area":[1]}`)
+			default:
+				fmt.Fprint(w, `{"id":7,"emp_code":"7","attemployee":{"id":7,"enable_attendance":true}}`)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}
+	c := newTestClient(t, srv)
+	params := &EmployeeParams{EnableAtt: new(false)}
+	ctx := t.Context()
+
+	// Value present and different: ignored, no extra request.
+	e, err := c.Employees.Update(ctx, 7, params)
+	var ufe *UnsupportedFieldError
+	if e != nil || !errors.Is(err, ErrUnsupportedField) || !errors.As(err, &ufe) {
+		t.Fatalf("got %+v %v", e, err)
+	}
+	if ufe.Field != "enable_att" || ufe.Reason != VerdictIgnored || ufe.Employee == nil || ufe.Employee.ID != 7 {
+		t.Errorf("%+v", ufe)
+	}
+	if !strings.Contains(err.Error(), "enable_att") || !strings.Contains(err.Error(), "employee 7") {
+		t.Error(err)
+	}
+	if gets.Load() != 0 {
+		t.Error("detail fetched although the write response carried the flag")
+	}
+	if e, err := c.Employees.Create(ctx, params); e != nil || !errors.As(err, &ufe) || ufe.Employee.ID != 7 {
+		t.Errorf("create: %+v %v", e, err)
+	}
+
+	// 8.x echoes the flag in the write response.
+	mode.Store(echoed)
+	if e, err := c.Employees.Update(ctx, 7, params); err != nil || e.ID != 7 {
+		t.Errorf("echoed flag: %+v %v", e, err)
+	}
+
+	// 9.0 omits the settings from the write response; the detail view decides.
+	mode.Store(silentOK)
+	gets.Store(0)
+	e, err = c.Employees.Create(ctx, params)
+	if err != nil || e == nil || e.ID != 7 || gets.Load() != 1 {
+		t.Errorf("silent but applied: %+v %v (gets %d)", e, err, gets.Load())
+	}
+	mode.Store(silentWrong)
+	if _, err := c.Employees.Create(ctx, params); !errors.As(err, &ufe) || ufe.Reason != VerdictIgnored {
+		t.Errorf("silent and ignored: %v", err)
+	}
+	mode.Store(neverShown)
+	if _, err := c.Employees.Update(ctx, 7, params); !errors.As(err, &ufe) || ufe.Reason != VerdictNotReported {
+		t.Errorf("never reported: %v", err)
+	}
+
+	// The read-back fails: no verdict, the record and the cause are both
+	// reachable, and the sentinel does not match.
+	mode.Store(readBackFails)
+	_, err = c.Employees.Create(ctx, params)
+	if !errors.As(err, &ufe) || ufe.Reason != VerdictUnverified || ufe.Employee == nil || ufe.Employee.ID != 7 || ufe.Field != "" {
+		t.Fatalf("read-back failure: %v", err)
+	}
+	if errors.Is(err, ErrUnsupportedField) || !errors.Is(err, ErrUnverified) {
+		t.Error("an unverified write must match ErrUnverified, not ErrUnsupportedField")
+	}
+	if !strings.HasPrefix(err.Error(), ErrUnverified.Error()) {
+		t.Errorf("message names the wrong state: %v", err)
+	}
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusInternalServerError {
+		t.Errorf("cause not reachable: %v", err)
+	}
+	if !strings.Contains(err.Error(), "unverified") || !strings.Contains(err.Error(), "employee 7") || !strings.Contains(err.Error(), "boom") {
+		t.Error(err)
+	}
+
+	// The write response carries no id: nothing to read back.
+	mode.Store(noID)
+	gets.Store(0)
+	if _, err := c.Employees.Create(ctx, params); !errors.As(err, &ufe) || ufe.Reason != VerdictNoID || gets.Load() != 0 || !errors.Is(err, ErrUnverified) || errors.Is(err, ErrUnsupportedField) {
+		t.Errorf("no id: %v (gets %d)", err, gets.Load())
+	}
+
+	// One requested flag echoed, another not: the detail view is consulted
+	// for the missing one instead of reporting it as unsupported.
+	mode.Store(partialEcho)
+	gets.Store(0)
+	if e, err := c.Employees.Update(ctx, 7, &EmployeeParams{EnableAtt: new(false), EnableOvertime: new(true)}); err != nil || e == nil || gets.Load() != 1 {
+		t.Errorf("partial echo: %+v %v (gets %d)", e, err, gets.Load())
+	}
+
+	// Flags that were not requested are neither checked nor fetched.
+	mode.Store(neverShown)
+	gets.Store(0)
+	if _, err := c.Employees.Update(ctx, 7, &EmployeeParams{CardNo: new("1")}); err != nil || gets.Load() != 0 {
+		t.Errorf("unrelated update: %v (gets %d)", err, gets.Load())
+	}
+
+	// The error type is safe to format without a record.
+	if s := (&UnsupportedFieldError{Reason: VerdictIgnored}).Error(); !strings.Contains(s, "employee unknown") || !strings.HasPrefix(s, ErrUnsupportedField.Error()) {
+		t.Errorf("nil-record Error(): %q", s)
+	}
+}
+
+func TestHeaderOptionsRejectControlCharacters(t *testing.T) {
+	for _, opt := range []Option{WithLanguage("en\r\nX: 1"), WithUserAgent("bad\nagent")} {
+		if _, err := New("http://x", opt); err == nil {
+			t.Error("control characters accepted in a header option")
+		}
+	}
+	if _, err := New("http://x", WithLanguage("ru-RU, ru;q=0.9"), WithUserAgent("app/1.0 (tab\tok)")); err != nil {
+		t.Errorf("valid header values rejected: %v", err)
+	}
+}
+
 func TestGetByCode(t *testing.T) {
 	f, srv := newFakeServer(t, Version8, AuthToken)
 	f.handler = func(w http.ResponseWriter, r *http.Request) {
@@ -560,7 +856,7 @@ func TestTransactionsFilterAndDecoding(t *testing.T) {
 
 	start := time.Date(2019, 3, 1, 0, 0, 0, 0, time.UTC)
 	page, err := c.Transactions.List(t.Context(), &TransactionFilter{
-		EmpCode: "1", TerminalSN: "SN", StartTime: start, EndTime: start.Add(24 * time.Hour),
+		EmpCode: "1", TerminalSN: "SN", TerminalAlias: "Gate", StartTime: start, EndTime: start.Add(24 * time.Hour),
 		ListOptions: ListOptions{Ordering: "punch_time"},
 	})
 	if err != nil {
@@ -570,7 +866,7 @@ func TestTransactionsFilterAndDecoding(t *testing.T) {
 	if q.Get("start_time") != "2019-03-01 03:00:00" || q.Get("end_time") != "2019-03-02 03:00:00" {
 		t.Errorf("time filters %v", q)
 	}
-	if q.Get("emp_code") != "1" || q.Get("terminal_sn") != "SN" || q.Get("ordering") != "punch_time" {
+	if q.Get("emp_code") != "1" || q.Get("terminal_sn") != "SN" || q.Get("terminal_alias") != "Gate" || q.Get("ordering") != "punch_time" {
 		t.Errorf("query %v", q)
 	}
 
@@ -681,10 +977,18 @@ func TestRedirectIsAnError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c, _ := New(srv.URL, WithToken("tok"))
-	emp, err := c.Employees.Create(t.Context(), &EmployeeParams{EmpCode: new("x")})
-	if apiErr, ok := errors.AsType[*Error](err); !ok || apiErr.StatusCode != http.StatusMovedPermanently || emp != nil {
-		t.Fatalf("got %+v, %v", emp, err)
+	// The default client and a caller-supplied one configured as the
+	// WithHTTPClient documentation prescribes must behave the same.
+	custom := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	for name, opts := range map[string][]Option{
+		"default client": {WithToken("tok")},
+		"custom client":  {WithToken("tok"), WithHTTPClient(custom)},
+	} {
+		c, _ := New(srv.URL, opts...)
+		emp, err := c.Employees.Create(t.Context(), &EmployeeParams{EmpCode: new("x")})
+		if apiErr, ok := errors.AsType[*Error](err); !ok || apiErr.StatusCode != http.StatusMovedPermanently || emp != nil {
+			t.Fatalf("%s: got %+v, %v", name, emp, err)
+		}
 	}
 }
 

@@ -149,10 +149,12 @@ func (t *Transaction) UnmarshalJSON(b []byte) error {
 // with a later window on the next run. The filter is sent as written.
 type TransactionFilter struct {
 	ListOptions
-	EmpCode    string
-	TerminalSN string
+	EmpCode       string
+	TerminalSN    string
+	TerminalAlias string
 	// StartTime and EndTime bound punch_time (inclusive). They are formatted
-	// in the zone returned by [Location].
+	// in the zone returned by [Location]. The server does not validate them:
+	// a value it cannot parse yields an empty result, not an error.
 	StartTime time.Time
 	EndTime   time.Time
 	// Params holds additional raw query parameters.
@@ -166,13 +168,15 @@ func (f *TransactionFilter) values(pageSizeParam string) url.Values {
 	return buildQuery(f.ListOptions, f.Params, pageSizeParam, func(q query) {
 		q.str("emp_code", f.EmpCode)
 		q.str("terminal_sn", f.TerminalSN)
+		q.str("terminal_alias", f.TerminalAlias)
 		q.time("start_time", f.StartTime)
 		q.time("end_time", f.EndTime)
 	})
 }
 
 // TransactionService accesses /iclock/api/transactions/. Punches are
-// read-only through this endpoint.
+// read-only through this service; 8.x also accepts POST, PATCH and DELETE
+// on the endpoint, reachable with [Client.Do].
 type TransactionService struct {
 	collection[Transaction, *TransactionFilter]
 }

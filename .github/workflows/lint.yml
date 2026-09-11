@@ -104,3 +104,36 @@ jobs:
 
       - name: Run modernize
         run: go run golang.org/x/tools/gopls/internal/analysis/modernize/cmd/modernize@v0.21.1 ./...
+
+  deadcode:
+    name: deadcode
+    needs: gate
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+
+      # Pinned for the same reason as the other tools: a new x/tools release
+      # can change what counts as dead and turn an untouched repo red. This
+      # is the golang.org/x/tools module version, not gopls' (modernize
+      # above); the two version independently.
+      - name: Install deadcode
+        run: go install golang.org/x/tools/cmd/deadcode@v0.48.0
+
+      # This module is a library: the only main package is examples/basic,
+      # so reachability is judged from it and from the tests (-test). An
+      # exported function nobody calls from either is reported, which is the
+      # intended bar: every public entry point has a test. deadcode exits
+      # zero regardless, so the job fails on output.
+      - name: Check for unreachable functions
+        run: |
+          out="$(deadcode -test ./...)"
+          if [ -n "$out" ]; then
+            echo "Unreachable functions:"
+            echo "$out"
+            exit 1
+          fi

@@ -1,14 +1,16 @@
 // Package biotime is a dependency-free Go client for the ZKTeco ZKBio Time
 // (formerly BioTime) attendance server REST API.
 //
-// The client supports both the legacy 8.x servers (the API documented at
-// http://<server>/api/docs/) and the current 9.0 servers (documented in the
-// "ZKBio Time 9.0 API User Manual"). The two generations differ in a few
+// The client supports both the legacy 8.x servers (the API documented per
+// app at http://<server>/api/personnel_docs/ and /api/iclock_docs/ after
+// login) and the current 9.0 servers (documented in the "ZKBio Time 9.0 API
+// User Manual"). The two generations differ in a few
 // details that the client hides from callers:
 //
 //   - 8.x paginates with the "page_size" query parameter, 9.0 with "limit".
-//   - 8.x wraps list responses as {count,next,previous,results}, 9.0 as
-//     {count,next,previous,code,msg,data}. [Page] decodes both shapes.
+//   - The tested 8.x build and 9.0 wrap list responses as
+//     {count,next,previous,code,msg,data}; [Page] also decodes the
+//     {count,next,previous,results} form documented for other 8.x builds.
 //   - 8.x issues JWT tokens from /jwt-api-token-auth/ ("Authorization: JWT ...")
 //     and static tokens from /api-token-auth/ ("Authorization: Token ...");
 //     9.0 documents only the latter. Both schemes are available, see [AuthScheme].

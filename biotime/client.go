@@ -18,6 +18,7 @@ import (
 const (
 	defaultTimeout   = 30 * time.Second
 	defaultUserAgent = "zkteco-biotime-go-client"
+	defaultLanguage  = "en"
 	defaultMaxBody   = 32 << 20
 )
 
@@ -32,6 +33,7 @@ type Client struct {
 	pageSizeParam string
 	scheme        AuthScheme
 	userAgent     string
+	language      string
 	logger        *slog.Logger
 
 	creds *credentials
@@ -81,6 +83,7 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 		version:   Version9,
 		scheme:    AuthToken,
 		userAgent: defaultUserAgent,
+		language:  defaultLanguage,
 	}
 	for _, opt := range opts {
 		if err := opt(c); err != nil {
@@ -292,6 +295,9 @@ func (c *Client) send(ctx context.Context, method string, target *url.URL, paylo
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", c.userAgent)
+	if c.language != "" {
+		req.Header.Set("Accept-Language", c.language)
+	}
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

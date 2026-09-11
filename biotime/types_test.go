@@ -2,6 +2,9 @@ package biotime
 
 import (
 	"encoding/json"
+	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -204,6 +207,12 @@ func TestEmployeeExtraFields(t *testing.T) {
 	if e.AttEmployee == nil || !e.AttEmployee.EnableAttendance {
 		t.Errorf("attemployee: %+v", e.AttEmployee)
 	}
+	if on, ok := e.AttendanceEnabled(); !ok || !on {
+		t.Errorf("AttendanceEnabled from nested object: %v %v", on, ok)
+	}
+	if _, ok := e.OvertimeEnabled(); !ok {
+		t.Error("OvertimeEnabled should be known when attemployee is present")
+	}
 	if len(e.Area) != 1 || e.Area[0].Object.AreaName != "ZKTeco" {
 		t.Errorf("area: %+v", e.Area)
 	}
@@ -220,6 +229,99 @@ func TestEmployeeExtraFields(t *testing.T) {
 	}
 	if plain.Extra != nil {
 		t.Errorf("expected nil Extra, got %v", plain.Extra)
+	}
+}
+
+// TestEmployeeLegacyShape decodes an employee as returned by BioTime 8.x,
+// where the attendance flags are top level and the record carries the
+// self-service password hash.
+func TestEmployeeLegacyShape(t *testing.T) {
+	SetLocation(time.UTC)
+	t.Cleanup(func() { SetLocation(nil) })
+
+	in := `{
+		"id": 4, "emp_code": "1", "first_name": "admin", "last_name": null, "nickname": null,
+		"device_password": "441820", "card_no": null,
+		"department": {"id": 1, "dept_code": "1", "dept_name": "Workshop"}, "position": null,
+		"hire_date": "2025-11-13", "gender": null, "birthday": null, "verify_mode": 0, "emp_type": null,
+		"enroll_sn": "NYU7251601121", "enable_att": true, "enable_overtime": false, "enable_holiday": true,
+		"dev_privilege": 14, "self_password": "pbkdf2_sha256$36000$salt$hash", "flow_role": [],
+		"area": [{"id": 2, "area_code": "2", "area_name": "A"}, {"id": 3, "area_code": "3", "area_name": "B"}],
+		"app_status": 0, "app_role": 1, "update_time": "2026-05-22 11:33:11",
+		"fingerprint": "-", "face": "-", "palm": "-", "vl_face": 1
+	}`
+	var e Employee
+	if err := json.Unmarshal([]byte(in), &e); err != nil {
+		t.Fatal(err)
+	}
+	if e.ID != 4 || e.LastName != "" || e.EmpType != nil || e.DevPrivilege != 14 || len(e.Area) != 2 {
+		t.Errorf("core: %+v", e)
+	}
+	if e.EnableAtt == nil || !*e.EnableAtt || e.EnableOvertime == nil || *e.EnableOvertime || e.EnableHoliday == nil || !*e.EnableHoliday {
+		t.Errorf("attendance flags: %v %v %v", e.EnableAtt, e.EnableOvertime, e.EnableHoliday)
+	}
+	if e.AttEmployee != nil {
+		t.Errorf("attemployee should be absent on 8.x, got %+v", e.AttEmployee)
+	}
+	if e.VLFace != "1" || e.Face != "-" {
+		t.Errorf("biometric summaries: vl_face %q face %q", e.VLFace, e.Face)
+	}
+	if on, ok := e.AttendanceEnabled(); !ok || !on {
+		t.Errorf("AttendanceEnabled: %v %v", on, ok)
+	}
+	if on, ok := e.OvertimeEnabled(); !ok || on {
+		t.Errorf("OvertimeEnabled: %v %v", on, ok)
+	}
+	b, err := json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.DevicePassword.Value() != "441820" {
+		t.Errorf("device password value %q", e.DevicePassword.Value())
+	}
+	for _, s := range []string{fmt.Sprintf("%v", e), fmt.Sprintf("%+v", e), fmt.Sprintf("%#v", e), fmt.Sprint(e.DevicePassword)} {
+		if strings.Contains(s, "441820") {
+			t.Errorf("device PIN leaked through fmt: %s", s)
+		}
+	}
+	var logged strings.Builder
+	slog.New(slog.NewTextHandler(&logged, nil)).Info("emp", "pin", e.DevicePassword)
+	if strings.Contains(logged.String(), "441820") || !strings.Contains(logged.String(), "redacted") {
+		t.Errorf("device PIN leaked through slog: %s", logged.String())
+	}
+	if strings.Contains(string(b), "441820") || !strings.Contains(string(b), `"device_password":"[redacted]"`) {
+		t.Errorf("device PIN leaked through JSON: %s", b)
+	}
+	var jsonLog strings.Builder
+	slog.New(slog.NewJSONHandler(&jsonLog, nil)).Info("emp", "employee", e)
+	if strings.Contains(jsonLog.String(), "441820") {
+		t.Errorf("device PIN leaked through the slog JSON handler: %s", jsonLog.String())
+	}
+	// A dump of the record cannot be fed back as a credential.
+	var roundTrip Employee
+	if err := json.Unmarshal(b, &roundTrip); err == nil || !strings.Contains(err.Error(), "placeholder") {
+		t.Errorf("redaction placeholder accepted as a value: %v", err)
+	}
+	var s Secret
+	if err := json.Unmarshal([]byte(`"441820"`), &s); err != nil || s.Value() != "441820" {
+		t.Errorf("real value rejected: %v", err)
+	}
+	if err := json.Unmarshal([]byte(`441820`), &s); err != nil || s.Value() != "441820" {
+		t.Errorf("numeric value rejected: %v", err)
+	}
+
+	var none Employee
+	if _, ok := none.AttendanceEnabled(); ok {
+		t.Error("flag reported as known on an empty record")
+	}
+	if e.Extra != nil {
+		t.Errorf("password hash or other members leaked into Extra: %v", e.Extra)
+	}
+
+	var reencoded map[string]json.RawMessage
+	_ = json.Unmarshal(b, &reencoded)
+	if _, ok := reencoded["self_password"]; ok {
+		t.Error("self_password re-encoded")
 	}
 }
 

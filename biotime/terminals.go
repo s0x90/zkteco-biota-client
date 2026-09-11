@@ -63,8 +63,11 @@ func (t *Terminal) UnmarshalJSON(b []byte) error {
 // TerminalFilter selects devices in [TerminalService.List].
 type TerminalFilter struct {
 	ListOptions
-	SN    string
-	Alias string
+	SN        string
+	Alias     string
+	IPAddress string
+	// State filters by connection state (see [Terminal.State]).
+	State *int
 	// Area filters by area identifier.
 	Area int
 	// Params holds additional raw query parameters.
@@ -78,12 +81,15 @@ func (f *TerminalFilter) values(pageSizeParam string) url.Values {
 	return buildQuery(f.ListOptions, f.Params, pageSizeParam, func(q query) {
 		q.str("sn", f.SN)
 		q.str("alias", f.Alias)
+		q.str("ip_address", f.IPAddress)
+		q.intPtr("state", f.State)
 		q.int("area", f.Area)
 	})
 }
 
 // TerminalService accesses /iclock/api/terminals/. Devices are read-only
-// through the API.
+// through this service; 8.x also accepts POST, PATCH and DELETE on the
+// endpoint, reachable with [Client.Do].
 type TerminalService struct {
 	collection[Terminal, *TerminalFilter]
 }
