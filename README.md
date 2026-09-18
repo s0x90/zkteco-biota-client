@@ -164,6 +164,13 @@ endpoint.
 - Rejected credentials are reported by the server as a `400` validation
   response; the error nevertheless matches `ErrUnauthorized` (and
   `ErrValidation`, which is how the server frames it).
+- After a rejection the automatic login is suspended for one minute and
+  every request in that window fails with the same error, so a fleet of
+  workers hitting an expired token during a password rotation does not
+  retry the bad password once per request and lock the account. An
+  explicit `Login` is never suspended; `SetToken` lifts the suspension. A
+  `5xx` or a network error on the login endpoint is not a rejection and is
+  retried on the next request.
 - Without a token and without credentials, the first request fails with
   `ErrNoCredentials`.
 
@@ -184,7 +191,8 @@ Terminals and transactions are read-only through the services. 8.x accepts
 Record types decode leniently. `FlexString`, `FlexInt` and `FlexFloat`
 accept a number or a string holding one, because the server is inconsistent
 about card numbers, device states and counters across versions and
-endpoints. `Ref[T]` decodes a related object whether the server expanded it
+endpoints. Lenient is not sloppy: a `FlexInt` fed `"1.9"` or a value outside
+the `int64` range is a decoding error, never a silently truncated number. `Ref[T]` decodes a related object whether the server expanded it
 (`{"id":1,"dept_name":…}`) or sent the bare id (`1`), and encodes as the id,
 which is what write endpoints expect. Members the struct does not declare are
 kept as raw JSON in `Extra` on employees, terminals and transactions.
@@ -230,11 +238,16 @@ depts, err := biotime.Collect(client.Departments.All(ctx, nil))
   internal address in `next` still work.
 - **A server that repeats a page** ends the walk with an error instead of
   looping forever. The repeated page has already been yielded by then, so a
-  consumer that writes as it reads should dedupe on `ID`.
+  consumer that writes as it reads should dedupe on `ID`. **A page with a
+  `next` link and no rows** is an error too, because a walk that quietly
+  stopped there would look like a complete export.
 - **The sequence can be ranged over more than once**, and concurrently; each
   walk starts from the first page.
-- **`Employees.GetByCode`** scans every candidate page for the exact code,
-  because some servers match `emp_code` as a prefix.
+- **`Employees.GetByCode`** scans the candidate pages for the exact code,
+  because some servers match `emp_code` as a prefix. It gives up after 1000
+  candidates with an error that matches neither sentinel: a code that short
+  on a personnel table that large is better looked up with `List` and the
+  server's exact-match parameters.
 
 ## Creating and updating
 
@@ -262,7 +275,8 @@ err = client.Employees.Delete(ctx, emp.ID)
 On create the server requires `EmpCode`, `Department` and `Area`; 9.0 also
 requires `FirstName`. Custom attributes that the administrator added in the
 server UI come back in `Employee.Extra` as raw JSON and are written through
-`EmployeeParams.Extra`.
+`EmployeeParams.Extra`. A key set both on the struct and in `Extra` is an
+encoding error rather than a silent choice between the two.
 
 ### Attendance flags are verified after a write
 
@@ -322,7 +336,7 @@ case errors.Is(err, biotime.ErrValidation):
 |---|---|
 | `ErrUnauthorized` | `401`, `403`, and a rejected login |
 | `ErrNotFound` | `404` |
-| `ErrValidation` | `400` with field errors |
+| `ErrValidation` | `400`; `Fields` carries the per-field messages when the server sent any |
 | `ErrNoCredentials` | a request needed a token and none was configured |
 | `ErrUnsupportedField` | a write was accepted but a field was ignored (see above) |
 | `ErrUnverified` | a write was accepted but could not be read back |
@@ -334,6 +348,9 @@ resource. Response bodies are capped (32 MiB by default, see
 
 Error messages come back in the language requested with `WithLanguage`
 (default `en`), so they are predictable whatever locale the server runs in.
+`Error()` names the endpoint without its query string, because filter
+values such as names and employee codes do not belong in a log line; the
+`URL` field keeps the complete address.
 
 ## Time zones
 
@@ -372,9 +389,10 @@ of its own.
 
 ## Credentials in records and logs
 
-- `WithLogger` logs the method, URL, status, size and duration of every
-  request at debug level. Tokens, passwords and request or response bodies
-  are never logged.
+- `WithLogger` logs the method, endpoint, status, size and duration of
+  every request at debug level. Tokens, passwords, request and response
+  bodies and query strings (which carry filter values such as names) are
+  never logged.
 - 8.x returns each employee's **device PIN in clear text** and the
   **self-service password hash**. The hash is dropped on decoding. The PIN
   is kept as `Employee.DevicePassword` of type `Secret`, which prints as

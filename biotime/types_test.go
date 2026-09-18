@@ -2,6 +2,7 @@ package biotime
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -99,6 +100,71 @@ func TestFlexTypes(t *testing.T) {
 	var bad FlexInt
 	if err := json.Unmarshal([]byte(`"abc"`), &bad); err == nil {
 		t.Error("expected error for non-numeric string")
+	}
+	// Integers written the long way are fine; anything that would be
+	// truncated is an error, never a silently wrong number.
+	for in, want := range map[string]int{`"5.0"`: 5, `1e3`: 1000, `"-7"`: -7} {
+		var v FlexInt
+		if err := json.Unmarshal([]byte(in), &v); err != nil || int(v) != want {
+			t.Errorf("%s: got %d, %v", in, v, err)
+		}
+	}
+	for _, in := range []string{`"1.9"`, `5.5`, `1e30`, `-1e30`, `"9223372036854775808"`} {
+		var v FlexInt
+		if err := json.Unmarshal([]byte(in), &v); err == nil {
+			t.Errorf("%s: decoded to %d, expected an error", in, v)
+		}
+	}
+}
+
+func TestObjectMembers(t *testing.T) {
+	in := []byte(` { "a" : 1 , "b\"q" : "x,}" , "c":{"d":[1,{"e":"}"}]} , "f" : null, "g":true }`)
+	var keys []string
+	var values []string
+	err := objectMembers(in, func(key string, value []byte) error {
+		keys = append(keys, key)
+		values = append(values, string(value))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(keys, "|"), `a|b"q|c|f|g`; got != want {
+		t.Errorf("keys %q", got)
+	}
+	if got, want := strings.Join(values, "|"), `1|"x,}"|{"d":[1,{"e":"}"}]}|null|true`; got != want {
+		t.Errorf("values %q", got)
+	}
+	if err := objectMembers([]byte(`{}`), func(string, []byte) error { t.Error("called"); return nil }); err != nil {
+		t.Error(err)
+	}
+	// Invalid input is reported, never a panic, and a callback error stops
+	// the scan.
+	for _, bad := range []string{``, `[]`, `{`, `{"a"}`, `{"a":}`, `{"a":1`, `{"a":1 "b":2}`, `{"a":"x}`, `{"a":{"b":1}`} {
+		if err := objectMembers([]byte(bad), func(string, []byte) error { return nil }); err == nil {
+			t.Errorf("%q: expected an error", bad)
+		}
+	}
+	sentinel := errors.New("stop")
+	if err := objectMembers([]byte(`{"a":1,"b":2}`), func(string, []byte) error { return sentinel }); !errors.Is(err, sentinel) {
+		t.Errorf("got %v", err)
+	}
+}
+
+func BenchmarkTransactionPageDecode(b *testing.B) {
+	row := `{"id":1,"emp":17,"emp_code":"100001","first_name":"Harry","last_name":"Potter","department":"Workshop","position":"","punch_time":"2019-03-04 09:50:00","punch_state":"0","punch_state_display":"Check In","verify_type":1,"verify_type_display":"Fingerprint","work_code":"","terminal_sn":"SN0000000001","terminal_alias":"Door","area_alias":"HQ","longitude":null,"latitude":null,"gps_location":"","mobile":"","source":1,"purpose":9,"crc":"","is_attendance":1,"reserved":"","upload_time":"2019-03-04 09:50:05","sync_status":0,"sync_time":null,"terminal":{"id":3,"sn":"SN0000000001","alias":"Door"},"is_mask":null,"temperature":null,"custom":true}`
+	rows := make([]string, 1000)
+	for i := range rows {
+		rows[i] = row
+	}
+	data := []byte(`{"count":1000,"next":null,"previous":null,"code":0,"msg":"","data":[` + strings.Join(rows, ",") + `]}`)
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	for b.Loop() {
+		var p Page[Transaction]
+		if err := json.Unmarshal(data, &p); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -337,7 +403,7 @@ func TestEmployeeParamsJSON(t *testing.T) {
 		Department: new(1),
 		Area:       []int{1},
 		HireDate:   NewDate(time.Date(2024, 6, 26, 0, 0, 0, 0, time.UTC)),
-		Extra:      map[string]any{"Passport": "AB123", "emp_code": "ignored"},
+		Extra:      map[string]any{"Passport": "AB123"},
 	}
 	out, err := json.Marshal(&p)
 	if err != nil {
@@ -371,6 +437,18 @@ func TestEmployeeParamsJSON(t *testing.T) {
 	}
 	if _, ok := m["Extra"]; ok {
 		t.Errorf("Extra map itself was encoded: %s", out)
+	}
+
+	// A key set both on the struct and in Extra is a caller bug that must
+	// not be resolved by silently dropping one of the two.
+	_, err = json.Marshal(&EmployeeParams{EmpCode: new("1"), Extra: map[string]any{"emp_code": "2"}})
+	if err == nil || !strings.Contains(err.Error(), `"emp_code"`) {
+		t.Errorf("got %v", err)
+	}
+	// Set only in Extra, a declared key is sent as written.
+	out, err = json.Marshal(&EmployeeParams{Extra: map[string]any{"emp_code": "2"}})
+	if err != nil || string(out) != `{"emp_code":"2"}` {
+		t.Errorf("got %s, %v", out, err)
 	}
 }
 

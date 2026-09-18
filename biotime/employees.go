@@ -3,13 +3,20 @@ package biotime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"iter"
 	"net/http"
 	"net/url"
 	"reflect"
 )
 
-const employeesPath = "/personnel/api/employees/"
+const (
+	employeesPath = "/personnel/api/employees/"
+	// maxCodeCandidates bounds the scan in [EmployeeService.GetByCode]. A
+	// server that matches emp_code as a prefix answers "1" with every code
+	// starting in 1; walking all of them for one lookup is not a lookup.
+	maxCodeCandidates = 1000
+)
 
 // Employee is a personnel record.
 type Employee struct {
@@ -350,16 +357,24 @@ func (s *EmployeeService) Get(ctx context.Context, id int) (*Employee, error) {
 }
 
 // GetByCode returns the employee with the given employee code, or an error
-// matching [ErrNotFound]. Some servers match emp_code as a prefix, so every
-// page of candidates is scanned for the exact code.
+// matching [ErrNotFound]. Some servers match emp_code as a prefix, so the
+// candidates are scanned for the exact code. The scan gives up after 1000
+// candidates with an error that matches neither sentinel; a code that short
+// on a server that large is better looked up with [EmployeeService.List]
+// and the server's own exact-match parameters.
 func (s *EmployeeService) GetByCode(ctx context.Context, empCode string) (*Employee, error) {
 	filter := &EmployeeFilter{EmpCode: empCode, ListOptions: ListOptions{PageSize: 100}}
+	seen := 0
 	for e, err := range s.All(ctx, filter) {
 		if err != nil {
 			return nil, err
 		}
 		if e.EmpCode == empCode {
 			return &e, nil
+		}
+		seen++
+		if seen >= maxCodeCandidates {
+			return nil, fmt.Errorf("biotime: employee %q: more than %d employees share the code prefix, scan aborted", empCode, maxCodeCandidates)
 		}
 	}
 	return nil, &Error{StatusCode: http.StatusNotFound, Method: http.MethodGet, URL: employeesPath, Message: "employee " + empCode + " not found"}

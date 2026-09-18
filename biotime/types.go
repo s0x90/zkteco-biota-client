@@ -3,8 +3,10 @@ package biotime
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -244,7 +246,8 @@ func (s *Secret) UnmarshalJSON(b []byte) error {
 }
 
 // FlexInt is an integer that also accepts JSON numeric strings when decoding.
-// Use a pointer to distinguish null from zero.
+// Use a pointer to distinguish null from zero. A value with a fractional
+// part or outside the int64 range is an error, never silently truncated.
 type FlexInt int
 
 // UnmarshalJSON implements [json.Unmarshaler].
@@ -259,9 +262,11 @@ func (i *FlexInt) UnmarshalJSON(b []byte) error {
 	}
 	v, err := n.Int64()
 	if err != nil {
+		// "5.0" and "1e3" are integers written the long way; accept those
+		// and nothing else.
 		f, ferr := n.Float64()
-		if ferr != nil {
-			return fmt.Errorf("biotime: FlexInt: %w", err)
+		if ferr != nil || f != math.Trunc(f) || f < math.MinInt64 || f >= math.MaxInt64 {
+			return fmt.Errorf("biotime: FlexInt: %q is not an integer", string(n))
 		}
 		v = int64(f)
 	}
@@ -356,13 +361,19 @@ func (r *Ref[T]) UnmarshalJSON(b []byte) error {
 		if err := json.Unmarshal(b, &obj); err != nil {
 			return err
 		}
-		var head struct {
-			ID FlexInt `json:"id"`
+		// b is valid JSON by now; pick the identifier out of it without a
+		// second decode of the whole object.
+		var id FlexInt
+		err := objectMembers(b, func(key string, value []byte) error {
+			if key == "id" {
+				return id.UnmarshalJSON(value)
+			}
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("biotime: Ref: %w", err)
 		}
-		if err := json.Unmarshal(b, &head); err != nil {
-			return err
-		}
-		*r = Ref[T]{ID: int(head.ID), Object: &obj}
+		*r = Ref[T]{ID: int(id), Object: &obj}
 		return nil
 	default:
 		var id FlexInt
@@ -418,26 +429,175 @@ func jsonKeys(t reflect.Type) map[string]struct{} {
 
 // extraFields returns the members of the JSON object b that are not declared
 // by the struct type t. It is used to surface the custom employee attributes
-// administrators can add in the server UI.
+// administrators can add in the server UI. b must already have been decoded
+// into t, which proves it well formed; the members are then located with
+// [objectMembers] rather than a second full decode, which on a 5000-row page
+// would double the time and allocations of every list call.
 func extraFields(b []byte, t reflect.Type) (map[string]json.RawMessage, error) {
-	var all map[string]json.RawMessage
-	if err := json.Unmarshal(b, &all); err != nil {
+	known := jsonKeys(t)
+	var extra map[string]json.RawMessage
+	err := objectMembers(b, func(key string, value []byte) error {
+		if _, ok := known[key]; ok {
+			return nil
+		}
+		if extra == nil {
+			extra = make(map[string]json.RawMessage)
+		}
+		// The input belongs to the caller; json.Unmarshaler implementations
+		// must copy what they retain.
+		extra[key] = bytes.Clone(value)
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
-	known := jsonKeys(t)
-	for k := range all {
-		if _, ok := known[k]; ok {
-			delete(all, k)
-		}
-	}
-	if len(all) == 0 {
-		return nil, nil
-	}
-	return all, nil
+	return extra, nil
 }
 
-// mergeExtra encodes v as a JSON object and adds the members of extra that
-// v does not already define.
+// errMalformedObject is returned by objectMembers for input that is not a
+// JSON object. Callers decode the input first, so reaching it means the
+// scanner and encoding/json disagree, which is a bug worth a clear name.
+var errMalformedObject = errors.New("biotime: malformed JSON object")
+
+// objectMembers calls fn with the key and the raw value of every member of
+// the JSON object b, in order. Keys are unescaped; values are sub-slices of
+// b, trimmed of surrounding whitespace, and must be copied to be retained.
+// The scan is structural only (strings, nesting, separators) and relies on b
+// being valid JSON; it never panics on invalid input but may report it as
+// errMalformedObject rather than pinpoint it.
+func objectMembers(b []byte, fn func(key string, value []byte) error) error {
+	i := skipSpace(b, 0)
+	if i >= len(b) || b[i] != '{' {
+		return errMalformedObject
+	}
+	i = skipSpace(b, i+1)
+	if i < len(b) && b[i] == '}' {
+		return nil
+	}
+	for {
+		if i >= len(b) || b[i] != '"' {
+			return errMalformedObject
+		}
+		keyEnd, ok := stringEnd(b, i)
+		if !ok {
+			return errMalformedObject
+		}
+		key, err := unquote(b[i:keyEnd])
+		if err != nil {
+			return err
+		}
+		i = skipSpace(b, keyEnd)
+		if i >= len(b) || b[i] != ':' {
+			return errMalformedObject
+		}
+		i = skipSpace(b, i+1)
+		valueEnd, ok := valueEnd(b, i)
+		if !ok {
+			return errMalformedObject
+		}
+		if err := fn(key, b[i:valueEnd]); err != nil {
+			return err
+		}
+		i = skipSpace(b, valueEnd)
+		if i >= len(b) {
+			return errMalformedObject
+		}
+		switch b[i] {
+		case ',':
+			i = skipSpace(b, i+1)
+		case '}':
+			return nil
+		default:
+			return errMalformedObject
+		}
+	}
+}
+
+// skipSpace returns the index of the first byte at or after i that is not
+// JSON whitespace.
+func skipSpace(b []byte, i int) int {
+	for i < len(b) {
+		switch b[i] {
+		case ' ', '\t', '\n', '\r':
+			i++
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+// stringEnd returns the index just past the closing quote of the JSON string
+// that opens at b[i].
+func stringEnd(b []byte, i int) (end int, ok bool) {
+	for j := i + 1; j < len(b); j++ {
+		switch b[j] {
+		case '\\':
+			j++
+		case '"':
+			return j + 1, true
+		}
+	}
+	return 0, false
+}
+
+// valueEnd returns the index just past the JSON value that starts at b[i].
+func valueEnd(b []byte, i int) (end int, ok bool) {
+	if i >= len(b) {
+		return 0, false
+	}
+	switch b[i] {
+	case '"':
+		return stringEnd(b, i)
+	case '{', '[':
+		depth := 0
+		for j := i; j < len(b); j++ {
+			switch b[j] {
+			case '"':
+				next, ok := stringEnd(b, j)
+				if !ok {
+					return 0, false
+				}
+				j = next - 1
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+				if depth == 0 {
+					return j + 1, true
+				}
+			}
+		}
+		return 0, false
+	default:
+		// A number, true, false or null: runs until a separator.
+		for j := i; j < len(b); j++ {
+			switch b[j] {
+			case ',', '}', ']', ' ', '\t', '\n', '\r':
+				return j, j > i
+			}
+		}
+		return len(b), len(b) > i
+	}
+}
+
+// unquote decodes a JSON string literal. Keys without escapes, which is all
+// of them in practice, skip the decoder.
+func unquote(lit []byte) (string, error) {
+	if bytes.IndexByte(lit, '\\') < 0 {
+		return string(lit[1 : len(lit)-1]), nil
+	}
+	var s string
+	if err := json.Unmarshal(lit, &s); err != nil {
+		return "", err
+	}
+	return s, nil
+}
+
+// mergeExtra encodes v as a JSON object and adds the members of extra. A key
+// that v already encodes is an error: silently keeping the struct's value
+// would drop a field the caller meant to send, which is the failure this
+// package goes out of its way to report when the server does it.
 func mergeExtra(v any, extra map[string]any) ([]byte, error) {
 	base, err := json.Marshal(v)
 	if err != nil {
@@ -452,7 +612,7 @@ func mergeExtra(v any, extra map[string]any) ([]byte, error) {
 	}
 	for k, val := range extra {
 		if _, exists := obj[k]; exists {
-			continue
+			return nil, fmt.Errorf("biotime: extra field %q is also set on the params struct; set it in one place only", k)
 		}
 		raw, err := json.Marshal(val)
 		if err != nil {

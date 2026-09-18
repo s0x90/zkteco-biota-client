@@ -18,7 +18,9 @@ var (
 	ErrUnauthorized = errors.New("biotime: unauthorized")
 	// ErrNotFound is matched when the server answered 404.
 	ErrNotFound = errors.New("biotime: not found")
-	// ErrValidation is matched when the server answered 400 with field errors.
+	// ErrValidation is matched when the server answered 400: the request
+	// is malformed and repeating it cannot succeed. [Error.Fields] carries
+	// the per-field messages when the server sent any.
 	ErrValidation = errors.New("biotime: validation failed")
 	// ErrNoCredentials is returned when a request needs a token but neither
 	// [WithToken] nor [WithCredentials] were configured.
@@ -124,7 +126,9 @@ func (e *UnsupportedFieldError) Unwrap() error { return e.Cause }
 type Error struct {
 	// StatusCode is the HTTP status of the response.
 	StatusCode int
-	// Method and URL identify the request that failed.
+	// Method and URL identify the request that failed. URL is complete,
+	// query included; [Error.Error] omits the query because filter values
+	// such as names and employee codes do not belong in a log line.
 	Method string
 	URL    string
 	// Code is the application-level code from a 9.0 response envelope, if any.
@@ -145,7 +149,8 @@ type Error struct {
 // Error implements the error interface.
 func (e *Error) Error() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "biotime: %s %s: %d %s", e.Method, e.URL, e.StatusCode, http.StatusText(e.StatusCode))
+	endpoint, _, _ := strings.Cut(e.URL, "?")
+	fmt.Fprintf(&b, "biotime: %s %s: %d %s", e.Method, endpoint, e.StatusCode, http.StatusText(e.StatusCode))
 	if e.Code != 0 {
 		fmt.Fprintf(&b, " (code %d)", e.Code)
 	}
@@ -173,7 +178,7 @@ func (e *Error) Is(target error) bool {
 	case ErrNotFound:
 		return e.StatusCode == http.StatusNotFound
 	case ErrValidation:
-		return e.StatusCode == http.StatusBadRequest && len(e.Fields) > 0
+		return e.StatusCode == http.StatusBadRequest
 	default:
 		return false
 	}

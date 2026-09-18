@@ -20,6 +20,12 @@ const (
 	defaultUserAgent = "zkteco-biotime-go-client"
 	defaultLanguage  = "en"
 	defaultMaxBody   = 32 << 20
+	// loginBackoff is how long an automatic re-login stays suspended after
+	// the server rejected the credentials. Without it, every request in
+	// flight when a token expires would retry the login with the same bad
+	// password, which is how an integration account gets locked out during
+	// a password rotation. [Client.Login] is never throttled.
+	loginBackoff = time.Minute
 )
 
 // Client talks to a ZKBio Time server. Create one with [New]. A Client is
@@ -37,9 +43,16 @@ type Client struct {
 	logger        *slog.Logger
 
 	creds *credentials
+	// now is the clock behind loginBackoff; tests replace it.
+	now func() time.Time
 
-	tokenMu sync.RWMutex
-	token   string
+	// tokenMu guards token and the last rejected login.
+	tokenMu     sync.RWMutex
+	token       string
+	loginErr    error     // the rejection, nil after a success or SetToken
+	loginFailed time.Time // when loginErr was recorded
+	// loginMu serializes automatic logins so that concurrent requests
+	// share one.
 	loginMu sync.Mutex
 
 	// Employees manages personnel records (/personnel/api/employees/).
@@ -62,8 +75,8 @@ type credentials struct {
 }
 
 // New returns a client for the server at baseURL, for example
-// "http://biotime.example.com:8080". The path component of baseURL, if any, is used
-// as a prefix for every request.
+// "http://biotime.example.com:8080". The path component of baseURL, if any,
+// is used as a prefix for every request.
 func New(baseURL string, opts ...Option) (*Client, error) {
 	u, err := url.Parse(strings.TrimRight(baseURL, "/"))
 	if err != nil {
@@ -84,6 +97,7 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 		scheme:    AuthToken,
 		userAgent: defaultUserAgent,
 		language:  defaultLanguage,
+		now:       time.Now,
 	}
 	for _, opt := range opts {
 		if err := opt(c); err != nil {
@@ -129,11 +143,31 @@ func (c *Client) Token() string {
 	return c.token
 }
 
-// SetToken replaces the access token in use.
+// SetToken replaces the access token in use and lifts the re-login backoff
+// that a rejected login may have set.
 func (c *Client) SetToken(token string) {
 	c.tokenMu.Lock()
 	defer c.tokenMu.Unlock()
 	c.token = token
+	c.loginErr = nil
+}
+
+// recentLoginFailure returns the error of the last rejected login when it
+// happened less than loginBackoff ago, else nil.
+func (c *Client) recentLoginFailure() error {
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
+	if c.loginErr != nil && c.now().Sub(c.loginFailed) < loginBackoff {
+		return c.loginErr
+	}
+	return nil
+}
+
+func (c *Client) recordLoginFailure(err error) {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	c.loginErr = err
+	c.loginFailed = c.now()
 }
 
 // Login obtains a fresh access token with the configured credentials and
@@ -142,7 +176,12 @@ func (c *Client) SetToken(token string) {
 //
 // Rejected credentials are reported by the server as a 400 validation
 // response; the returned error matches both [ErrUnauthorized] and
-// [ErrValidation] and can be unwrapped into an [*Error].
+// [ErrValidation] and can be unwrapped into an [*Error]. After such a
+// rejection the automatic login is suspended for one minute and every
+// request in that window fails with the same error, so that a fleet of
+// workers hitting an expired token does not retry the bad credentials
+// once per request and trip the server's lockout. Login itself is never
+// suspended, and [Client.SetToken] lifts the suspension.
 func (c *Client) Login(ctx context.Context) (string, error) {
 	if c.creds == nil {
 		return "", ErrNoCredentials
@@ -151,9 +190,14 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 		Token string `json:"token"`
 	}
 	if err := c.request(ctx, http.MethodPost, c.scheme.loginPath(), nil, c.creds, &resp, false); err != nil {
-		if apiErr, ok := errors.AsType[*Error](err); ok {
+		// Rejected credentials come back as 400 (Django REST framework's
+		// validation shape), 401 or 403. Anything else, a 502 from a proxy
+		// or a 500 from the server, is not a verdict on the credentials:
+		// it is neither "unauthorized" nor a reason to suspend re-login.
+		if apiErr, ok := errors.AsType[*Error](err); ok && (apiErr.StatusCode == http.StatusBadRequest || apiErr.Is(ErrUnauthorized)) {
 			c.log(ctx, "biotime: login rejected", "scheme", string(c.scheme), "status", apiErr.StatusCode)
 			apiErr.login = true
+			c.recordLoginFailure(err)
 		}
 		return "", err
 	}
@@ -175,6 +219,9 @@ func (c *Client) ensureToken(ctx context.Context) (string, error) {
 	if t := c.Token(); t != "" {
 		return t, nil
 	}
+	if err := c.recentLoginFailure(); err != nil {
+		return "", err
+	}
 	return c.Login(ctx)
 }
 
@@ -189,6 +236,9 @@ func (c *Client) refreshToken(ctx context.Context, rejected string) (string, err
 	defer c.loginMu.Unlock()
 	if t := c.Token(); t != "" && t != rejected {
 		return t, nil
+	}
+	if err := c.recentLoginFailure(); err != nil {
+		return "", err
 	}
 	c.log(ctx, "biotime: token rejected, re-authenticating", "scheme", string(c.scheme))
 	return c.Login(ctx)
@@ -316,14 +366,24 @@ func (c *Client) send(ctx context.Context, method string, target *url.URL, paylo
 	if err != nil {
 		return 0, nil, fmt.Errorf("biotime: reading %s %s response: %w", method, target, err)
 	}
+	// The query carries filter values such as names and employee codes;
+	// the log line names the endpoint only.
 	c.log(ctx, "biotime: request",
 		"method", method,
-		"url", target.String(),
+		"url", withoutQuery(target),
 		"status", resp.StatusCode,
 		"bytes", len(body),
 		"duration", time.Since(start),
 	)
 	return resp.StatusCode, body, nil
+}
+
+// withoutQuery renders u without its query and fragment.
+func withoutQuery(u *url.URL) string {
+	bare := *u
+	bare.RawQuery = ""
+	bare.Fragment = ""
+	return bare.String()
 }
 
 // errBodyTooLarge is wrapped by readCapped when a body exceeds the limit.

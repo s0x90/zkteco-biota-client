@@ -130,7 +130,9 @@ func listPage[T any](ctx context.Context, c *Client, path string, q url.Values) 
 // A server that keeps advertising a page it has already served ends the walk
 // with an error rather than looping forever. The repeated page has already
 // been yielded by then; consumers that write as they read should dedupe on
-// identifier or buffer a page before committing.
+// identifier or buffer a page before committing. A page that carries a next
+// link but no rows is reported as an error too: a walk that ends early
+// without one would look like a complete export.
 //
 // The returned sequence can be ranged over any number of times, and
 // concurrently; every walk starts from the first page.
@@ -157,7 +159,11 @@ func iterate[T any](ctx context.Context, c *Client, path string, q url.Values) i
 					return
 				}
 			}
-			if !p.HasNext() || len(p.Results) == 0 {
+			if !p.HasNext() {
+				return
+			}
+			if len(p.Results) == 0 {
+				fail(fmt.Errorf("biotime: server returned an empty page that links to a next page %q, aborting iteration", p.Next))
 				return
 			}
 			next, err := nextQuery(cur, p.Next)

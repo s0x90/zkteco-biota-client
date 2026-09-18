@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -427,6 +428,113 @@ func TestReauthWithoutCredentials(t *testing.T) {
 	}
 }
 
+// loginRequests counts the requests the fake received on its login path.
+func (f *fakeServer) loginRequests() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, r := range f.requests {
+		if strings.HasSuffix(r.URL.Path, f.scheme.loginPath()) {
+			n++
+		}
+	}
+	return n
+}
+
+func TestRejectedLoginIsNotRetriedPerRequest(t *testing.T) {
+	f, srv := newFakeServer(t, Version9, AuthToken)
+	f.handler = func(w http.ResponseWriter, r *http.Request) { f.page(w, 0, "") }
+	c := newTestClient(t, srv, WithCredentials("admin", "wrong"))
+	now := time.Now()
+	c.now = func() time.Time { return now }
+
+	// A fleet of workers with a bad password: one login attempt, not one
+	// per worker, and each worker gets the rejection.
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			if _, err := c.Positions.List(t.Context(), nil); !errors.Is(err, ErrUnauthorized) {
+				t.Errorf("got %v", err)
+			}
+		})
+	}
+	wg.Wait()
+	if n := f.loginRequests(); n != 1 {
+		t.Errorf("login attempts %d", n)
+	}
+
+	// Explicit Login is never throttled.
+	if _, err := c.Login(t.Context()); !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("got %v", err)
+	}
+	if n := f.loginRequests(); n != 2 {
+		t.Errorf("login attempts %d", n)
+	}
+
+	// After the backoff the automatic login is tried again.
+	now = now.Add(loginBackoff)
+	_, _ = c.Positions.List(t.Context(), nil)
+	if n := f.loginRequests(); n != 3 {
+		t.Errorf("login attempts %d", n)
+	}
+
+	// A token set by the caller lifts the suspension.
+	c.SetToken("tok-1")
+	if _, err := c.Positions.List(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRejectedReloginIsNotRetriedPerRequest(t *testing.T) {
+	f, srv := newFakeServer(t, Version8, AuthJWT)
+	f.handler = func(w http.ResponseWriter, r *http.Request) { f.page(w, 0, "") }
+	// A valid pre-issued token and a password that has since been rotated.
+	c := newTestClient(t, srv, WithAuthScheme(AuthJWT), WithToken("tok-1"), WithCredentials("admin", "rotated"))
+	if _, err := c.Areas.List(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.token = "tok-expired"
+	f.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			if _, err := c.Areas.List(t.Context(), nil); !errors.Is(err, ErrUnauthorized) {
+				t.Errorf("got %v", err)
+			}
+		})
+	}
+	wg.Wait()
+	if n := f.loginRequests(); n != 1 {
+		t.Errorf("login attempts %d", n)
+	}
+}
+
+func TestTransientLoginFailureIsRetried(t *testing.T) {
+	f, srv := newFakeServer(t, Version9, AuthToken)
+	var fail atomic.Bool
+	fail.Store(true)
+	outer := srv.Config.Handler
+	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fail.Load() && strings.HasSuffix(r.URL.Path, f.scheme.loginPath()) {
+			http.Error(w, "upstream down", http.StatusBadGateway)
+			return
+		}
+		outer.ServeHTTP(w, r)
+	})
+	f.handler = func(w http.ResponseWriter, r *http.Request) { f.page(w, 0, "") }
+	c := newTestClient(t, srv)
+	if _, err := c.Areas.List(t.Context(), nil); err == nil || errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("got %v", err)
+	}
+	// A 502 on login is not a rejection: the next request tries again.
+	fail.Store(false)
+	if _, err := c.Areas.List(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestConcurrentLoginHappensOnce(t *testing.T) {
 	f, srv := newFakeServer(t, Version9, AuthToken)
 	f.handler = func(w http.ResponseWriter, r *http.Request) { f.page(w, 0, "") }
@@ -561,16 +669,21 @@ func TestPaginationModernAndEnvelopeError(t *testing.T) {
 	}
 }
 
-func TestIterationStopsOnEmptyPage(t *testing.T) {
+func TestIterationFailsOnEmptyPageWithNextLink(t *testing.T) {
 	f, srv := newFakeServer(t, Version9, AuthToken)
 	f.handler = func(w http.ResponseWriter, r *http.Request) {
-		// A misbehaving server that always claims there is a next page.
-		f.page(w, 0, "next")
+		// A server that hands out no rows but claims there is a next page:
+		// an overloaded view answering 200 with an empty list. Stopping
+		// quietly would look like a complete export.
+		f.page(w, 500, "next")
 	}
 	c := newTestClient(t, srv)
 	all, err := Collect(c.Departments.All(t.Context(), nil))
-	if err != nil || len(all) != 0 {
+	if err == nil || !strings.Contains(err.Error(), "empty page") || len(all) != 0 {
 		t.Fatal(all, err)
+	}
+	if n := len(f.requests); n != 2 {
+		t.Errorf("expected login and one list request, got %d", n)
 	}
 }
 
@@ -838,6 +951,29 @@ func TestGetByCode(t *testing.T) {
 	}
 }
 
+func TestGetByCodeGivesUpOnTooManyCandidates(t *testing.T) {
+	f, srv := newFakeServer(t, Version9, AuthToken)
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		// A prefix-matching server with a huge personnel table: every page
+		// is full of near misses and links to the next one.
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		page = max(page, 1)
+		items := make([]any, 0, 100)
+		for i := range 100 {
+			items = append(items, map[string]any{"id": page*1000 + i, "emp_code": fmt.Sprintf("1%04d", page*100+i)})
+		}
+		f.page(w, 50000, fmt.Sprintf("%s/personnel/api/employees/?emp_code=1&page=%d", srv.URL, page+1), items...)
+	}
+	c := newTestClient(t, srv)
+	_, err := c.Employees.GetByCode(t.Context(), "1")
+	if err == nil || !strings.Contains(err.Error(), "scan aborted") || errors.Is(err, ErrNotFound) {
+		t.Fatalf("got %v", err)
+	}
+	if n := len(f.requests) - 1; n != maxCodeCandidates/100 {
+		t.Errorf("expected %d list requests, got %d", maxCodeCandidates/100, n)
+	}
+}
+
 func TestTransactionsFilterAndDecoding(t *testing.T) {
 	SetLocation(time.FixedZone("srv", 3*3600))
 	t.Cleanup(func() { SetLocation(nil) })
@@ -960,6 +1096,38 @@ func TestErrorParsing(t *testing.T) {
 	}
 	if !errors.Is(newError("GET", "u", 403, nil), ErrUnauthorized) {
 		t.Error("403 should match ErrUnauthorized")
+	}
+	// A 400 without field errors is still a request that cannot succeed
+	// on retry.
+	if !errors.Is(newError("GET", "u", 400, []byte(`{"detail":"Malformed request."}`)), ErrValidation) {
+		t.Error("bare 400 should match ErrValidation")
+	}
+	// Filter values are personal data; the message names the endpoint only,
+	// the URL field keeps everything for callers who want it.
+	e = newError("GET", "http://x/personnel/api/employees/?search=Ivanova&page=2", 404, nil)
+	if s := e.Error(); strings.Contains(s, "Ivanova") || !strings.Contains(s, "http://x/personnel/api/employees/") {
+		t.Error(s)
+	}
+	if !strings.Contains(e.URL, "search=Ivanova") {
+		t.Error(e.URL)
+	}
+}
+
+func TestDebugLogOmitsQuery(t *testing.T) {
+	f, srv := newFakeServer(t, Version9, AuthToken)
+	f.handler = func(w http.ResponseWriter, r *http.Request) { f.page(w, 0, "") }
+	var logged strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	c := newTestClient(t, srv, WithLogger(logger))
+	if _, err := c.Employees.List(t.Context(), &EmployeeFilter{ListOptions: ListOptions{Search: "Ivanova"}}); err != nil {
+		t.Fatal(err)
+	}
+	out := logged.String()
+	if strings.Contains(out, "Ivanova") || strings.Contains(out, "secret") || strings.Contains(out, "tok-1") {
+		t.Errorf("log leaks filter values or credentials:\n%s", out)
+	}
+	if !strings.Contains(out, "/personnel/api/employees/") {
+		t.Errorf("log names no endpoint:\n%s", out)
 	}
 }
 
