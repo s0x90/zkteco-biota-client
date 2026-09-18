@@ -190,12 +190,19 @@ func pageRef(next string) string {
 	if err != nil {
 		return "the next page"
 	}
+	// The link is server-controlled input headed for a log line; only a
+	// number gets through.
 	q := u.Query()
 	if page := q.Get("page"); page != "" {
-		return fmt.Sprintf("page %s", page)
+		if _, err := strconv.Atoi(page); err == nil {
+			return "page " + page
+		}
+		return "a page with a non-numeric number"
 	}
 	if offset := q.Get("offset"); offset != "" {
-		return fmt.Sprintf("the page at offset %s", offset)
+		if _, err := strconv.Atoi(offset); err == nil {
+			return "the page at offset " + offset
+		}
 	}
 	return "the next page"
 }

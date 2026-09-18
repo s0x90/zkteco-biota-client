@@ -157,17 +157,20 @@ func (c *Client) SetToken(token string) {
 // own wrapper around the shared rejection, and the refusal is logged, so a
 // trace shows which requests never reached the server.
 func (c *Client) recentLoginFailure(ctx context.Context) error {
+	// Snapshot and release before logging: the logger is the caller's code
+	// and must never run under a lock of this package.
 	c.tokenMu.RLock()
-	defer c.tokenMu.RUnlock()
-	if c.loginErr == nil {
+	loginErr, failedAt := c.loginErr, c.loginFailed
+	c.tokenMu.RUnlock()
+	if loginErr == nil {
 		return nil
 	}
-	remaining := loginBackoff - c.now().Sub(c.loginFailed)
+	remaining := loginBackoff - c.now().Sub(failedAt)
 	if remaining <= 0 {
 		return nil
 	}
 	c.log(ctx, "biotime: login suspended after rejection", "scheme", string(c.scheme), "retry_in", remaining)
-	return fmt.Errorf("biotime: login suspended for %s after a rejection: %w", loginBackoff, c.loginErr)
+	return fmt.Errorf("biotime: login suspended for %s after a rejection: %w", loginBackoff, loginErr)
 }
 
 func (c *Client) recordLoginFailure(err error) {
@@ -205,7 +208,15 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 		if apiErr, ok := errors.AsType[*Error](err); ok && isLoginRejection(apiErr) {
 			c.log(ctx, "biotime: login rejected", "scheme", string(c.scheme), "status", apiErr.StatusCode)
 			apiErr.login = true
-			c.recordLoginFailure(err)
+			// The request was refused, so the error is "unauthorized" either
+			// way; but only a verdict the server itself wrote suspends the
+			// re-login. Django REST framework always sends a JSON "detail"
+			// or field errors, and newError discards HTML bodies, so a
+			// message-less 403 is an edge device's block page, not a
+			// rejected password.
+			if apiErr.Message != "" || len(apiErr.Fields) > 0 {
+				c.recordLoginFailure(err)
+			}
 		}
 		return "", err
 	}

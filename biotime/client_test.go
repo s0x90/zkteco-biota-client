@@ -545,6 +545,37 @@ func TestTransientLoginFailureIsRetried(t *testing.T) {
 	}
 }
 
+func TestEdgeForbiddenOnLoginDoesNotSuspend(t *testing.T) {
+	f, srv := newFakeServer(t, Version9, AuthToken)
+	var block atomic.Bool
+	block.Store(true)
+	outer := srv.Config.Handler
+	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if block.Load() && strings.HasSuffix(r.URL.Path, f.scheme.loginPath()) {
+			// A WAF's block page: 403 with HTML, no verdict from the server.
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, "<html><body>Access denied</body></html>")
+			return
+		}
+		outer.ServeHTTP(w, r)
+	})
+	f.handler = func(w http.ResponseWriter, r *http.Request) { f.page(w, 0, "") }
+	c := newTestClient(t, srv)
+	// Refused is refused: the error is unauthorized. But it is not the
+	// server's verdict on the password, so nothing is suspended.
+	if _, err := c.Areas.List(t.Context(), nil); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("got %v", err)
+	}
+	block.Store(false)
+	if _, err := c.Areas.List(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.loginRequests(); n != 1 {
+		t.Errorf("login attempts seen by the server %d; the block page must not suspend login", n)
+	}
+}
+
 func TestProxyBadRequestOnLoginIsNotARejection(t *testing.T) {
 	f, srv := newFakeServer(t, Version9, AuthToken)
 	var fail atomic.Bool
@@ -1245,6 +1276,19 @@ func TestIterationDetectsRepeatedPage(t *testing.T) {
 	all, err := Collect(c.Areas.All(t.Context(), &AreaFilter{ListOptions: ListOptions{Search: "Ivanova"}}))
 	if err == nil || !strings.Contains(err.Error(), "repeated page 2") || strings.Contains(err.Error(), "Ivanova") {
 		t.Fatalf("expected a repeated page error naming the page and not the filter, got %v", err)
+	}
+	// The link is server-controlled; only a numeric page reaches the error.
+	for link, want := range map[string]string{
+		"/x/?page=7":                     "page 7",
+		"/x/?page=1%0AERROR+forged+line": "a page with a non-numeric number",
+		"/x/?offset=200":                 "the page at offset 200",
+		"/x/?offset=%0A":                 "the next page",
+		"/x/":                            "the next page",
+		"://bad":                         "the next page",
+	} {
+		if got := pageRef(link); got != want {
+			t.Errorf("pageRef(%q) = %q, want %q", link, got, want)
+		}
 	}
 	if len(all) != 2 {
 		t.Errorf("expected the two pages served before detection, got %d", len(all))

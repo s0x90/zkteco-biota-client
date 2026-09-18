@@ -172,8 +172,10 @@ endpoint.
   Suspended requests are logged and their error says so while still
   matching the rejection's sentinels. A `5xx`, a network error or a proxy's
   bare `400` on the login endpoint is not a rejection and is retried on the
-  next request; only the server's own verdict (`401`, `403`, or `400` with
-  field errors) counts.
+  next request. Only the server's own verdict counts: a `401`, `403` or
+  `400` that carries Django REST framework's JSON message or field errors.
+  An edge device's HTML block page is refused like any other request but
+  suspends nothing.
 - Without a token and without credentials, the first request fails with
   `ErrNoCredentials`.
 
