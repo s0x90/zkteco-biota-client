@@ -163,7 +163,7 @@ func iterate[T any](ctx context.Context, c *Client, path string, q url.Values) i
 				return
 			}
 			if len(p.Results) == 0 {
-				fail(fmt.Errorf("biotime: server returned an empty page that links to a next page %q, aborting iteration", p.Next))
+				fail(fmt.Errorf("biotime: server returned an empty page that links to %s, aborting iteration", pageRef(p.Next)))
 				return
 			}
 			next, err := nextQuery(cur, p.Next)
@@ -173,13 +173,31 @@ func iterate[T any](ctx context.Context, c *Client, path string, q url.Values) i
 			}
 			key := next.Encode()
 			if _, dup := seen[key]; dup {
-				fail(fmt.Errorf("biotime: server repeated page %q, aborting iteration", key))
+				fail(fmt.Errorf("biotime: server repeated %s, aborting iteration", pageRef(p.Next)))
 				return
 			}
 			seen[key] = struct{}{}
 			cur = next
 		}
 	}
+}
+
+// pageRef names the page a next link points to for an error message. The
+// link's query carries the filter, and filter values such as names do not
+// belong in an error string; the page number is what an operator needs.
+func pageRef(next string) string {
+	u, err := url.Parse(next)
+	if err != nil {
+		return "the next page"
+	}
+	q := u.Query()
+	if page := q.Get("page"); page != "" {
+		return fmt.Sprintf("page %s", page)
+	}
+	if offset := q.Get("offset"); offset != "" {
+		return fmt.Sprintf("the page at offset %s", offset)
+	}
+	return "the next page"
 }
 
 // nextQuery derives the query for the following page from the server's

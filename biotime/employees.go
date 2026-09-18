@@ -359,9 +359,9 @@ func (s *EmployeeService) Get(ctx context.Context, id int) (*Employee, error) {
 // GetByCode returns the employee with the given employee code, or an error
 // matching [ErrNotFound]. Some servers match emp_code as a prefix, so the
 // candidates are scanned for the exact code. The scan gives up after 1000
-// candidates with an error that matches neither sentinel; a code that short
-// on a server that large is better looked up with [EmployeeService.List]
-// and the server's own exact-match parameters.
+// candidates with an error matching [ErrTooManyCandidates]; a code that
+// short on a server that large is better looked up with
+// [EmployeeService.List] and the server's own exact-match parameters.
 func (s *EmployeeService) GetByCode(ctx context.Context, empCode string) (*Employee, error) {
 	filter := &EmployeeFilter{EmpCode: empCode, ListOptions: ListOptions{PageSize: 100}}
 	seen := 0
@@ -374,7 +374,7 @@ func (s *EmployeeService) GetByCode(ctx context.Context, empCode string) (*Emplo
 		}
 		seen++
 		if seen >= maxCodeCandidates {
-			return nil, fmt.Errorf("biotime: employee %q: more than %d employees share the code prefix, scan aborted", empCode, maxCodeCandidates)
+			return nil, fmt.Errorf("%w: employee code %q matched at least %d records as a prefix; use List with an exact filter", ErrTooManyCandidates, empCode, maxCodeCandidates)
 		}
 	}
 	return nil, &Error{StatusCode: http.StatusNotFound, Method: http.MethodGet, URL: employeesPath, Message: "employee " + empCode + " not found"}

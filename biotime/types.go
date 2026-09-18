@@ -270,6 +270,12 @@ func (i *FlexInt) UnmarshalJSON(b []byte) error {
 		}
 		v = int64(f)
 	}
+	// int is 32 bits wide on some of the hosts this runs on (a 32-bit
+	// Raspberry Pi next to the door controller); a value that does not fit
+	// must not wrap.
+	if v < math.MinInt || v > math.MaxInt {
+		return fmt.Errorf("biotime: FlexInt: %q does not fit in int", string(n))
+	}
 	*i = FlexInt(v)
 	return nil
 }
@@ -364,8 +370,8 @@ func (r *Ref[T]) UnmarshalJSON(b []byte) error {
 		// b is valid JSON by now; pick the identifier out of it without a
 		// second decode of the whole object.
 		var id FlexInt
-		err := objectMembers(b, func(key string, value []byte) error {
-			if key == "id" {
+		err := objectMembers(b, func(key, value []byte) error {
+			if string(key) == "id" {
 				return id.UnmarshalJSON(value)
 			}
 			return nil
@@ -436,8 +442,10 @@ func jsonKeys(t reflect.Type) map[string]struct{} {
 func extraFields(b []byte, t reflect.Type) (map[string]json.RawMessage, error) {
 	known := jsonKeys(t)
 	var extra map[string]json.RawMessage
-	err := objectMembers(b, func(key string, value []byte) error {
-		if _, ok := known[key]; ok {
+	err := objectMembers(b, func(key, value []byte) error {
+		// The conversion in an index expression does not allocate, so the
+		// common case, a known key, costs nothing.
+		if _, ok := known[string(key)]; ok {
 			return nil
 		}
 		if extra == nil {
@@ -445,7 +453,7 @@ func extraFields(b []byte, t reflect.Type) (map[string]json.RawMessage, error) {
 		}
 		// The input belongs to the caller; json.Unmarshaler implementations
 		// must copy what they retain.
-		extra[key] = bytes.Clone(value)
+		extra[string(key)] = bytes.Clone(value)
 		return nil
 	})
 	if err != nil {
@@ -460,12 +468,13 @@ func extraFields(b []byte, t reflect.Type) (map[string]json.RawMessage, error) {
 var errMalformedObject = errors.New("biotime: malformed JSON object")
 
 // objectMembers calls fn with the key and the raw value of every member of
-// the JSON object b, in order. Keys are unescaped; values are sub-slices of
-// b, trimmed of surrounding whitespace, and must be copied to be retained.
+// the JSON object b, in order. Keys are unescaped; keys without escapes and
+// all values are sub-slices of b, trimmed of surrounding whitespace, and
+// must be copied to be retained.
 // The scan is structural only (strings, nesting, separators) and relies on b
 // being valid JSON; it never panics on invalid input but may report it as
 // errMalformedObject rather than pinpoint it.
-func objectMembers(b []byte, fn func(key string, value []byte) error) error {
+func objectMembers(b []byte, fn func(key, value []byte) error) error {
 	i := skipSpace(b, 0)
 	if i >= len(b) || b[i] != '{' {
 		return errMalformedObject
@@ -582,16 +591,16 @@ func valueEnd(b []byte, i int) (end int, ok bool) {
 }
 
 // unquote decodes a JSON string literal. Keys without escapes, which is all
-// of them in practice, skip the decoder.
-func unquote(lit []byte) (string, error) {
+// of them in practice, are returned as a sub-slice of lit without copying.
+func unquote(lit []byte) ([]byte, error) {
 	if bytes.IndexByte(lit, '\\') < 0 {
-		return string(lit[1 : len(lit)-1]), nil
+		return lit[1 : len(lit)-1], nil
 	}
 	var s string
 	if err := json.Unmarshal(lit, &s); err != nil {
-		return "", err
+		return nil, err
 	}
-	return s, nil
+	return []byte(s), nil
 }
 
 // mergeExtra encodes v as a JSON object and adds the members of extra. A key

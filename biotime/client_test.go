@@ -444,7 +444,9 @@ func (f *fakeServer) loginRequests() int {
 func TestRejectedLoginIsNotRetriedPerRequest(t *testing.T) {
 	f, srv := newFakeServer(t, Version9, AuthToken)
 	f.handler = func(w http.ResponseWriter, r *http.Request) { f.page(w, 0, "") }
-	c := newTestClient(t, srv, WithCredentials("admin", "wrong"))
+	var logged strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	c := newTestClient(t, srv, WithCredentials("admin", "wrong"), WithLogger(logger))
 	now := time.Now()
 	c.now = func() time.Time { return now }
 
@@ -461,6 +463,14 @@ func TestRejectedLoginIsNotRetriedPerRequest(t *testing.T) {
 	wg.Wait()
 	if n := f.loginRequests(); n != 1 {
 		t.Errorf("login attempts %d", n)
+	}
+	// The refusals are visible in the trace and the error says so while
+	// still matching the rejection's sentinels.
+	if !strings.Contains(logged.String(), "login suspended") {
+		t.Error("suspended logins were not logged")
+	}
+	if _, err := c.Positions.List(t.Context(), nil); err == nil || !strings.Contains(err.Error(), "suspended") || !errors.Is(err, ErrValidation) {
+		t.Errorf("got %v", err)
 	}
 
 	// Explicit Login is never throttled.
@@ -532,6 +542,39 @@ func TestTransientLoginFailureIsRetried(t *testing.T) {
 	fail.Store(false)
 	if _, err := c.Areas.List(t.Context(), nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestProxyBadRequestOnLoginIsNotARejection(t *testing.T) {
+	f, srv := newFakeServer(t, Version9, AuthToken)
+	var fail atomic.Bool
+	fail.Store(true)
+	outer := srv.Config.Handler
+	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fail.Load() && strings.HasSuffix(r.URL.Path, f.scheme.loginPath()) {
+			// A reverse proxy's 400: HTML, no field errors, no verdict.
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, "<html><body>400 Bad Request</body></html>")
+			return
+		}
+		outer.ServeHTTP(w, r)
+	})
+	f.handler = func(w http.ResponseWriter, r *http.Request) { f.page(w, 0, "") }
+	c := newTestClient(t, srv)
+	_, err := c.Areas.List(t.Context(), nil)
+	if err == nil || errors.Is(err, ErrUnauthorized) || !errors.Is(err, ErrValidation) {
+		t.Fatalf("got %v", err)
+	}
+	fail.Store(false)
+	if _, err := c.Areas.List(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	// The proxy answered the first attempt before the fake saw it; the
+	// retry is the one the fake recorded. A suspended login would have
+	// recorded none.
+	if n := f.loginRequests(); n != 1 {
+		t.Errorf("login attempts seen by the server %d; the proxy error must not suspend login", n)
 	}
 }
 
@@ -678,9 +721,12 @@ func TestIterationFailsOnEmptyPageWithNextLink(t *testing.T) {
 		f.page(w, 500, "next")
 	}
 	c := newTestClient(t, srv)
-	all, err := Collect(c.Departments.All(t.Context(), nil))
+	all, err := Collect(c.Departments.All(t.Context(), &DepartmentFilter{ListOptions: ListOptions{Search: "Ivanova"}}))
 	if err == nil || !strings.Contains(err.Error(), "empty page") || len(all) != 0 {
 		t.Fatal(all, err)
+	}
+	if strings.Contains(err.Error(), "Ivanova") {
+		t.Errorf("error carries the filter: %v", err)
 	}
 	if n := len(f.requests); n != 2 {
 		t.Errorf("expected login and one list request, got %d", n)
@@ -966,7 +1012,7 @@ func TestGetByCodeGivesUpOnTooManyCandidates(t *testing.T) {
 	}
 	c := newTestClient(t, srv)
 	_, err := c.Employees.GetByCode(t.Context(), "1")
-	if err == nil || !strings.Contains(err.Error(), "scan aborted") || errors.Is(err, ErrNotFound) {
+	if !errors.Is(err, ErrTooManyCandidates) || errors.Is(err, ErrNotFound) {
 		t.Fatalf("got %v", err)
 	}
 	if n := len(f.requests) - 1; n != maxCodeCandidates/100 {
@@ -1196,9 +1242,9 @@ func TestIterationDetectsRepeatedPage(t *testing.T) {
 		f.page(w, 99, srv.URL+"/personnel/api/areas/?page=2", map[string]any{"id": 1})
 	}
 	c := newTestClient(t, srv)
-	all, err := Collect(c.Areas.All(t.Context(), nil))
-	if err == nil || !strings.Contains(err.Error(), "repeated page") {
-		t.Fatalf("expected repeated page error, got %v", err)
+	all, err := Collect(c.Areas.All(t.Context(), &AreaFilter{ListOptions: ListOptions{Search: "Ivanova"}}))
+	if err == nil || !strings.Contains(err.Error(), "repeated page 2") || strings.Contains(err.Error(), "Ivanova") {
+		t.Fatalf("expected a repeated page error naming the page and not the filter, got %v", err)
 	}
 	if len(all) != 2 {
 		t.Errorf("expected the two pages served before detection, got %d", len(all))

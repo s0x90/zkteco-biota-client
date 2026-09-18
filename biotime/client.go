@@ -152,15 +152,22 @@ func (c *Client) SetToken(token string) {
 	c.loginErr = nil
 }
 
-// recentLoginFailure returns the error of the last rejected login when it
-// happened less than loginBackoff ago, else nil.
-func (c *Client) recentLoginFailure() error {
+// recentLoginFailure returns an error wrapping the last rejected login when
+// it happened less than loginBackoff ago, else nil. Each caller gets its
+// own wrapper around the shared rejection, and the refusal is logged, so a
+// trace shows which requests never reached the server.
+func (c *Client) recentLoginFailure(ctx context.Context) error {
 	c.tokenMu.RLock()
 	defer c.tokenMu.RUnlock()
-	if c.loginErr != nil && c.now().Sub(c.loginFailed) < loginBackoff {
-		return c.loginErr
+	if c.loginErr == nil {
+		return nil
 	}
-	return nil
+	remaining := loginBackoff - c.now().Sub(c.loginFailed)
+	if remaining <= 0 {
+		return nil
+	}
+	c.log(ctx, "biotime: login suspended after rejection", "scheme", string(c.scheme), "retry_in", remaining)
+	return fmt.Errorf("biotime: login suspended for %s after a rejection: %w", loginBackoff, c.loginErr)
 }
 
 func (c *Client) recordLoginFailure(err error) {
@@ -190,11 +197,12 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 		Token string `json:"token"`
 	}
 	if err := c.request(ctx, http.MethodPost, c.scheme.loginPath(), nil, c.creds, &resp, false); err != nil {
-		// Rejected credentials come back as 400 (Django REST framework's
-		// validation shape), 401 or 403. Anything else, a 502 from a proxy
-		// or a 500 from the server, is not a verdict on the credentials:
-		// it is neither "unauthorized" nor a reason to suspend re-login.
-		if apiErr, ok := errors.AsType[*Error](err); ok && (apiErr.StatusCode == http.StatusBadRequest || apiErr.Is(ErrUnauthorized)) {
+		// Rejected credentials come back as 401, 403, or Django REST
+		// framework's 400 with field errors ("non_field_errors"). Anything
+		// else, a 502 from a proxy, a 500 from the server or a proxy's
+		// bare 400, is not a verdict on the credentials: it is neither
+		// "unauthorized" nor a reason to suspend re-login.
+		if apiErr, ok := errors.AsType[*Error](err); ok && isLoginRejection(apiErr) {
 			c.log(ctx, "biotime: login rejected", "scheme", string(c.scheme), "status", apiErr.StatusCode)
 			apiErr.login = true
 			c.recordLoginFailure(err)
@@ -209,6 +217,12 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 	return resp.Token, nil
 }
 
+// isLoginRejection reports whether a login failure is the server's verdict
+// on the credentials rather than a transport or proxy problem.
+func isLoginRejection(e *Error) bool {
+	return e.Is(ErrUnauthorized) || (e.StatusCode == http.StatusBadRequest && len(e.Fields) > 0)
+}
+
 // ensureToken returns the current token, logging in first when none is set.
 func (c *Client) ensureToken(ctx context.Context) (string, error) {
 	if t := c.Token(); t != "" {
@@ -219,7 +233,7 @@ func (c *Client) ensureToken(ctx context.Context) (string, error) {
 	if t := c.Token(); t != "" {
 		return t, nil
 	}
-	if err := c.recentLoginFailure(); err != nil {
+	if err := c.recentLoginFailure(ctx); err != nil {
 		return "", err
 	}
 	return c.Login(ctx)
@@ -237,7 +251,7 @@ func (c *Client) refreshToken(ctx context.Context, rejected string) (string, err
 	if t := c.Token(); t != "" && t != rejected {
 		return t, nil
 	}
-	if err := c.recentLoginFailure(); err != nil {
+	if err := c.recentLoginFailure(ctx); err != nil {
 		return "", err
 	}
 	c.log(ctx, "biotime: token rejected, re-authenticating", "scheme", string(c.scheme))

@@ -22,6 +22,11 @@ var (
 	// is malformed and repeating it cannot succeed. [Error.Fields] carries
 	// the per-field messages when the server sent any.
 	ErrValidation = errors.New("biotime: validation failed")
+	// ErrTooManyCandidates is returned by [EmployeeService.GetByCode] when
+	// a prefix-matching server answers with more candidates than the
+	// lookup is willing to scan. The condition is permanent for that code;
+	// list with an exact filter instead of retrying.
+	ErrTooManyCandidates = errors.New("biotime: too many candidates, lookup aborted")
 	// ErrNoCredentials is returned when a request needs a token but neither
 	// [WithToken] nor [WithCredentials] were configured.
 	ErrNoCredentials = errors.New("biotime: no token or credentials configured")

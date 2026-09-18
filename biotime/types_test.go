@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -109,7 +110,12 @@ func TestFlexTypes(t *testing.T) {
 			t.Errorf("%s: got %d, %v", in, v, err)
 		}
 	}
-	for _, in := range []string{`"1.9"`, `5.5`, `1e30`, `-1e30`, `"9223372036854775808"`} {
+	tooBig := []string{`"1.9"`, `5.5`, `1e30`, `-1e30`, `"9223372036854775808"`}
+	if math.MaxInt < math.MaxInt64 {
+		// 32-bit int: values that fit int64 but not int must not wrap.
+		tooBig = append(tooBig, `4294967296`, `"2147483648"`)
+	}
+	for _, in := range tooBig {
 		var v FlexInt
 		if err := json.Unmarshal([]byte(in), &v); err == nil {
 			t.Errorf("%s: decoded to %d, expected an error", in, v)
@@ -121,8 +127,8 @@ func TestObjectMembers(t *testing.T) {
 	in := []byte(` { "a" : 1 , "b\"q" : "x,}" , "c":{"d":[1,{"e":"}"}]} , "f" : null, "g":true }`)
 	var keys []string
 	var values []string
-	err := objectMembers(in, func(key string, value []byte) error {
-		keys = append(keys, key)
+	err := objectMembers(in, func(key, value []byte) error {
+		keys = append(keys, string(key))
 		values = append(values, string(value))
 		return nil
 	})
@@ -135,18 +141,18 @@ func TestObjectMembers(t *testing.T) {
 	if got, want := strings.Join(values, "|"), `1|"x,}"|{"d":[1,{"e":"}"}]}|null|true`; got != want {
 		t.Errorf("values %q", got)
 	}
-	if err := objectMembers([]byte(`{}`), func(string, []byte) error { t.Error("called"); return nil }); err != nil {
+	if err := objectMembers([]byte(`{}`), func(_, _ []byte) error { t.Error("called"); return nil }); err != nil {
 		t.Error(err)
 	}
 	// Invalid input is reported, never a panic, and a callback error stops
 	// the scan.
 	for _, bad := range []string{``, `[]`, `{`, `{"a"}`, `{"a":}`, `{"a":1`, `{"a":1 "b":2}`, `{"a":"x}`, `{"a":{"b":1}`} {
-		if err := objectMembers([]byte(bad), func(string, []byte) error { return nil }); err == nil {
+		if err := objectMembers([]byte(bad), func(_, _ []byte) error { return nil }); err == nil {
 			t.Errorf("%q: expected an error", bad)
 		}
 	}
 	sentinel := errors.New("stop")
-	if err := objectMembers([]byte(`{"a":1,"b":2}`), func(string, []byte) error { return sentinel }); !errors.Is(err, sentinel) {
+	if err := objectMembers([]byte(`{"a":1,"b":2}`), func(_, _ []byte) error { return sentinel }); !errors.Is(err, sentinel) {
 		t.Errorf("got %v", err)
 	}
 }

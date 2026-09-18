@@ -168,9 +168,12 @@ endpoint.
   every request in that window fails with the same error, so a fleet of
   workers hitting an expired token during a password rotation does not
   retry the bad password once per request and lock the account. An
-  explicit `Login` is never suspended; `SetToken` lifts the suspension. A
-  `5xx` or a network error on the login endpoint is not a rejection and is
-  retried on the next request.
+  explicit `Login` is never suspended; `SetToken` lifts the suspension.
+  Suspended requests are logged and their error says so while still
+  matching the rejection's sentinels. A `5xx`, a network error or a proxy's
+  bare `400` on the login endpoint is not a rejection and is retried on the
+  next request; only the server's own verdict (`401`, `403`, or `400` with
+  field errors) counts.
 - Without a token and without credentials, the first request fails with
   `ErrNoCredentials`.
 
@@ -245,9 +248,9 @@ depts, err := biotime.Collect(client.Departments.All(ctx, nil))
   walk starts from the first page.
 - **`Employees.GetByCode`** scans the candidate pages for the exact code,
   because some servers match `emp_code` as a prefix. It gives up after 1000
-  candidates with an error that matches neither sentinel: a code that short
-  on a personnel table that large is better looked up with `List` and the
-  server's exact-match parameters.
+  candidates with an error matching `ErrTooManyCandidates`: a code that
+  short on a personnel table that large is better looked up with `List` and
+  the server's exact-match parameters.
 
 ## Creating and updating
 
@@ -338,6 +341,7 @@ case errors.Is(err, biotime.ErrValidation):
 | `ErrNotFound` | `404` |
 | `ErrValidation` | `400`; `Fields` carries the per-field messages when the server sent any |
 | `ErrNoCredentials` | a request needed a token and none was configured |
+| `ErrTooManyCandidates` | `GetByCode` gave up scanning a prefix-matching server |
 | `ErrUnsupportedField` | a write was accepted but a field was ignored (see above) |
 | `ErrUnverified` | a write was accepted but could not be read back |
 
@@ -350,7 +354,8 @@ Error messages come back in the language requested with `WithLanguage`
 (default `en`), so they are predictable whatever locale the server runs in.
 `Error()` names the endpoint without its query string, because filter
 values such as names and employee codes do not belong in a log line; the
-`URL` field keeps the complete address.
+`URL` field keeps the complete address. Pagination errors name the page
+number, never the link.
 
 ## Time zones
 
