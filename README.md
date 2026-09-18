@@ -354,10 +354,12 @@ resource. Response bodies are capped (32 MiB by default, see
 
 Error messages come back in the language requested with `WithLanguage`
 (default `en`), so they are predictable whatever locale the server runs in.
-`Error()` names the endpoint without its query string, because filter
-values such as names and employee codes do not belong in a log line; the
-`URL` field keeps the complete address. Pagination errors name the page
-number, never the link.
+No error carries the query string, because filter values such as names and
+employee codes do not belong in a log line. `Error()` names the endpoint
+and keeps the complete address in the `URL` field; timeout, connection and
+decoding errors are scrubbed the same way, including the `url.Error` the
+transport wraps around them; pagination errors name the page number, never
+the link.
 
 ## Time zones
 

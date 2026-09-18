@@ -1190,6 +1190,60 @@ func TestErrorParsing(t *testing.T) {
 	}
 }
 
+func TestTransportErrorsOmitQuery(t *testing.T) {
+	filter := &EmployeeFilter{ListOptions: ListOptions{Search: "Ivanova"}}
+
+	t.Run("timeout", func(t *testing.T) {
+		f, srv := newFakeServer(t, Version9, AuthToken)
+		f.handler = func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-time.After(5 * time.Second):
+			case <-r.Context().Done():
+			}
+		}
+		c := newTestClient(t, srv, WithTimeout(50*time.Millisecond))
+		_, err := c.Employees.List(t.Context(), filter)
+		if err == nil {
+			t.Fatal("expected a timeout")
+		}
+		// The transport's own *url.Error carries the URL a second time.
+		if strings.Contains(err.Error(), "Ivanova") {
+			t.Errorf("timeout error carries the filter: %v", err)
+		}
+		if !strings.Contains(err.Error(), "/personnel/api/employees/") {
+			t.Errorf("timeout error names no endpoint: %v", err)
+		}
+	})
+
+	t.Run("malformed body", func(t *testing.T) {
+		f, srv := newFakeServer(t, Version9, AuthToken)
+		f.handler = func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "not json") }
+		c := newTestClient(t, srv)
+		_, err := c.Employees.List(t.Context(), filter)
+		if err == nil {
+			t.Fatal("expected a decode error")
+		}
+		if strings.Contains(err.Error(), "Ivanova") {
+			t.Errorf("decode error carries the filter: %v", err)
+		}
+	})
+
+	t.Run("oversized body", func(t *testing.T) {
+		f, srv := newFakeServer(t, Version9, AuthToken)
+		f.handler = func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, strings.Repeat("x", 4096))
+		}
+		c := newTestClient(t, srv, WithMaxBodySize(64))
+		_, err := c.Employees.List(t.Context(), filter)
+		if err == nil || !errors.Is(err, errBodyTooLarge) {
+			t.Fatalf("got %v", err)
+		}
+		if strings.Contains(err.Error(), "Ivanova") {
+			t.Errorf("read error carries the filter: %v", err)
+		}
+	})
+}
+
 func TestDebugLogOmitsQuery(t *testing.T) {
 	f, srv := newFakeServer(t, Version9, AuthToken)
 	f.handler = func(w http.ResponseWriter, r *http.Request) { f.page(w, 0, "") }

@@ -184,14 +184,19 @@ func (c *Client) recordLoginFailure(err error) {
 // stores it in the client. Calling it explicitly is optional: the first
 // request that needs a token logs in automatically.
 //
-// Rejected credentials are reported by the server as a 400 validation
-// response; the returned error matches both [ErrUnauthorized] and
-// [ErrValidation] and can be unwrapped into an [*Error]. After such a
-// rejection the automatic login is suspended for one minute and every
-// request in that window fails with the same error, so that a fleet of
-// workers hitting an expired token does not retry the bad credentials
-// once per request and trip the server's lockout. Login itself is never
-// suspended, and [Client.SetToken] lifts the suspension.
+// A refused login (401, 403, or the 400 with field errors that Django REST
+// framework uses for bad credentials) returns an error matching
+// [ErrUnauthorized]; the 400 form also matches [ErrValidation]. Either can
+// be unwrapped into an [*Error].
+//
+// When the refusal carries the server's own JSON verdict, the automatic
+// login is suspended for one minute and every request in that window fails
+// with an error wrapping the rejection, so that a fleet of workers hitting
+// an expired token does not retry a bad password once per request and trip
+// the server's lockout. A refusal without a JSON body, such as an edge
+// device's block page, and any 5xx or transport failure suspend nothing.
+// Login itself is never suspended, and [Client.SetToken] lifts the
+// suspension.
 func (c *Client) Login(ctx context.Context) (string, error) {
 	if c.creds == nil {
 		return "", ErrNoCredentials
@@ -338,7 +343,7 @@ func (c *Client) request(ctx context.Context, method, path string, query url.Val
 		return nil
 	}
 	if err := json.Unmarshal(respBody, out); err != nil {
-		return fmt.Errorf("biotime: decoding %s %s response: %w", method, target, err)
+		return fmt.Errorf("biotime: decoding %s %s response: %w", method, withoutQuery(target), err)
 	}
 	if env, ok := out.(envelope); ok {
 		if code := env.envelopeCode(); code != 0 {
@@ -383,13 +388,20 @@ func (c *Client) send(ctx context.Context, method string, target *url.URL, paylo
 	start := time.Now()
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return 0, nil, fmt.Errorf("biotime: %s %s: %w", method, target, err)
+		// The transport wraps its own *url.Error around the complete URL,
+		// so stripping only our prefix would still print the query, whose
+		// values are filter terms such as names. A timeout is the most
+		// frequently logged error there is; scrub the wrapped one too.
+		if uerr, ok := errors.AsType[*url.Error](err); ok {
+			uerr.URL = withoutQuery(target)
+		}
+		return 0, nil, fmt.Errorf("biotime: %s %s: %w", method, withoutQuery(target), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err = readCapped(resp.Body, c.maxBody)
 	if err != nil {
-		return 0, nil, fmt.Errorf("biotime: reading %s %s response: %w", method, target, err)
+		return 0, nil, fmt.Errorf("biotime: reading %s %s response: %w", method, withoutQuery(target), err)
 	}
 	// The query carries filter values such as names and employee codes;
 	// the log line names the endpoint only.
