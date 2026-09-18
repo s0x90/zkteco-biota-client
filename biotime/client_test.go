@@ -138,7 +138,7 @@ func newTestClient(t *testing.T, srv *httptest.Server, opts ...Option) *Client {
 }
 
 func TestNewValidation(t *testing.T) {
-	for _, bad := range []string{"", "192.168.0.27:8080", "ftp://x", "http://"} {
+	for _, bad := range []string{"", "biotime.example.com:8080", "ftp://x", "http://"} {
 		if _, err := New(bad); err == nil {
 			t.Errorf("New(%q) succeeded", bad)
 		}

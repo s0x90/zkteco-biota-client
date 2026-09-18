@@ -21,7 +21,7 @@
 //
 // Basic usage:
 //
-//	client, err := biotime.New("http://192.168.0.27:8080",
+//	client, err := biotime.New("http://biotime.example.com:8080",
 //		biotime.WithVersion(biotime.Version8),
 //		biotime.WithCredentials("admin", "secret"),
 //	)

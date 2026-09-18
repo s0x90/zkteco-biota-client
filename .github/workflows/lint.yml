@@ -4,136 +4,57 @@ on:
   push:
     branches: [master]
   pull_request:
-    # See test.yml for why "labeled" is here.
-    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
 
 permissions:
   contents: read
 
-defaults:
-  run:
-    shell: bash
+# The installed Go must satisfy go.mod on its own. Without this, a tool bump
+# raising the go directive in internal/tools/go.mod past the version installed
+# below would silently download and build with a different toolchain than the
+# one CI reports.
+env:
+  GOTOOLCHAIN: local
 
+# Cancel superseded runs on PR branches only. On master every merge shares the
+# same ref, so cancelling would drop earlier merges' results and coverage uploads.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  gate:
-    uses: ./.github/workflows/gate.yml
+  lint:
+    # One matrix entry per tool so each shows up as its own check and they run
+    # in parallel. The tools are pinned in internal/tools/go.mod and built via
+    # the Makefile, so CI and contributors run exactly the same commands.
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: golangci-lint
+            target: lint-golangci-lint
+          - name: govulncheck
+            target: lint-govulncheck
+          - name: deadcode
+            target: lint-deadcode
+          - name: CI matrix drift
+            target: check-ci
 
-  golangci:
-    name: golangci-lint
-    needs: gate
-    runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The Go version is read from go.mod, resolved to its latest patch
+      # release, so it lives in exactly one place.
       - name: Set up Go
-        uses: ./.github/actions/setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache-dependency-path: internal/tools/go.sum
 
-      # Build golangci-lint from source with the project's Go toolchain so it
-      # supports the Go language version declared in go.mod (which may be newer
-      # than the version bundled in published golangci-lint binaries). Pinned:
-      # a new release changes which checks run, and that belongs in a commit.
-      - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4
-
-      - name: Run golangci-lint
-        run: golangci-lint run --timeout=5m ./...
-
-  gofumpt:
-    name: gofumpt formatting
-    needs: gate
-    runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-
-      - name: Set up Go
-        uses: ./.github/actions/setup-go
-
-      - name: Install gofumpt
-        run: go install mvdan.cc/gofumpt@v0.12.0
-
-      - name: Run gofumpt
-        run: |
-          out="$(gofumpt -l .)"
-          if [ -n "$out" ]; then
-            echo "The following files are not gofumpt-formatted:"
-            echo "$out"
-            echo
-            echo "Diff:"
-            gofumpt -d .
-            exit 1
-          fi
-
-  govulncheck:
-    name: govulncheck
-    needs: gate
-    runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-
-      - name: Set up Go
-        uses: ./.github/actions/setup-go
-
-      - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
-
-      - name: Run govulncheck
-        run: govulncheck ./...
-
-  modernize:
-    name: modernize analyzer
-    needs: gate
-    runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-
-      - name: Set up Go
-        uses: ./.github/actions/setup-go
-
-      - name: Run modernize
-        run: go run golang.org/x/tools/gopls/internal/analysis/modernize/cmd/modernize@v0.21.1 ./...
-
-  deadcode:
-    name: deadcode
-    needs: gate
-    runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-
-      - name: Set up Go
-        uses: ./.github/actions/setup-go
-
-      # Pinned for the same reason as the other tools: a new x/tools release
-      # can change what counts as dead and turn an untouched repo red. This
-      # is the golang.org/x/tools module version, not gopls' (modernize
-      # above); the two version independently.
-      - name: Install deadcode
-        run: go install golang.org/x/tools/cmd/deadcode@v0.48.0
-
-      # This module is a library: the only main package is examples/basic,
-      # so reachability is judged from it and from the tests (-test). An
-      # exported function nobody calls from either is reported, which is the
-      # intended bar: every public entry point has a test. deadcode exits
-      # zero regardless, so the job fails on output.
-      - name: Check for unreachable functions
-        run: |
-          out="$(deadcode -test ./...)"
-          if [ -n "$out" ]; then
-            echo "Unreachable functions:"
-            echo "$out"
-            exit 1
-          fi
+      - name: ${{ matrix.name }}
+        run: make ${{ matrix.target }}

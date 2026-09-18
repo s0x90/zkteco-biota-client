@@ -15,7 +15,8 @@ linters:
     - makezero
     - nilerr
     # idiomatic / modern
-    - intrange
+    # intrange is not listed: modernize's rangeint reports the same loops, and
+    # with uniq-by-line off both would fire on every one of them.
     - modernize
     - usestdlibvars
     # style / quality
@@ -26,7 +27,8 @@ linters:
     - revive
     - unconvert
     - unparam
-    - whitespace
+    # whitespace is not listed: the gofumpt formatter removes the same leading
+    # and trailing blank lines.
 
   settings:
     errcheck:
@@ -104,7 +106,8 @@ linters:
 
 formatters:
   enable:
-    - gofmt
+    # gofumpt is a strict superset of gofmt, so gofmt would be redundant.
+    - gofumpt
     - goimports
   settings:
     goimports:
@@ -112,5 +115,9 @@ formatters:
         - github.com/s0x90/zkteco-biota-client
 
 issues:
+  # Report every finding, not just the first per line. With the default (true),
+  # a modernize finding is dropped whenever another linter reports on the same
+  # line, which silently hides modernize results.
+  uniq-by-line: false
   max-issues-per-linter: 0
   max-same-issues: 0

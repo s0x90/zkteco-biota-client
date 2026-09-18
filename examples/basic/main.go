@@ -1,6 +1,6 @@
 // Command basic demonstrates the biotime client against a live server.
 //
-//	BIOTIME_URL=http://192.168.0.27:8080 BIOTIME_USER=admin BIOTIME_PASS=secret \
+//	BIOTIME_URL=http://biotime.example.com:8080 BIOTIME_USER=admin BIOTIME_PASS=secret \
 //	  go run ./examples/basic -version 8 -since 24h
 package main
 

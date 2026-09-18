@@ -62,7 +62,7 @@ type credentials struct {
 }
 
 // New returns a client for the server at baseURL, for example
-// "http://192.168.0.27:8080". The path component of baseURL, if any, is used
+// "http://biotime.example.com:8080". The path component of baseURL, if any, is used
 // as a prefix for every request.
 func New(baseURL string, opts ...Option) (*Client, error) {
 	u, err := url.Parse(strings.TrimRight(baseURL, "/"))
