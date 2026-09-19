@@ -253,6 +253,58 @@ func TestPageJSON(t *testing.T) {
 	}
 }
 
+// TestPageShapes covers what a body that is not one of the two list
+// envelopes decodes to. Reporting "I did not recognize this" as an empty
+// page would turn a misrouted request into an export that writes no rows.
+func TestPageShapes(t *testing.T) {
+	for name, tc := range map[string]struct {
+		in      string
+		wantErr string
+		count   int
+		results int
+	}{
+		"8.x envelope": {in: `{"count":2,"next":null,"results":[{"id":1},{"id":2}]}`, count: 2, results: 2},
+		"9.0 envelope": {in: `{"count":2,"next":null,"code":0,"data":[{"id":1},{"id":2}]}`, count: 2, results: 2},
+		"empty 8.x":    {in: `{"count":0,"next":null,"results":[]}`},
+		"empty 9.0":    {in: `{"count":0,"next":null,"data":[]}`},
+		"data null":    {in: `{"count":0,"next":null,"data":null}`},
+		// A failure envelope reaches the caller as an *Error built from the
+		// code, so it must decode even without a data member.
+		"failure envelope":  {in: `{"code":3,"msg":"boom"}`},
+		"failure with data": {in: `{"count":0,"msg":"boom","code":3,"data":[]}`},
+		// Contradictions: a count with no list, or no envelope at all.
+		"data is an object": {in: `{"count":5,"next":null,"data":{"id":1}}`, wantErr: "an object"},
+		"data is a string":  {in: `{"count":5,"data":"denied"}`, wantErr: "a string"},
+		"data is a number":  {in: `{"count":5,"data":7}`, wantErr: "a number"},
+		"bare object":       {in: `{"id":1,"area_code":"2","area_name":"HQ"}`, wantErr: "not a list"},
+		"empty object":      {in: `{}`, wantErr: "not a list"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var p Page[Area]
+			err := json.Unmarshal([]byte(tc.in), &p)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Fatalf("got %v, want an error mentioning %q", err, tc.wantErr)
+			case tc.wantErr != "":
+				// The value itself must not be quoted back: a body holds
+				// personal data.
+				if strings.Contains(err.Error(), "denied") || strings.Contains(err.Error(), "HQ") {
+					t.Errorf("error quotes the body: %v", err)
+				}
+				return
+			}
+			if p.Count != tc.count || len(p.Results) != tc.results {
+				t.Errorf("count %d results %d", p.Count, len(p.Results))
+			}
+			if p.Results == nil {
+				t.Error("Results is nil, want an empty slice")
+			}
+		})
+	}
+}
+
 func TestEmployeeExtraFields(t *testing.T) {
 	SetLocation(time.UTC)
 	t.Cleanup(func() { SetLocation(nil) })

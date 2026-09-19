@@ -252,6 +252,13 @@ depts, err := biotime.Collect(client.Departments.All(ctx, nil))
   consumer that writes as it reads should dedupe on `ID`. **A page with a
   `next` link and no rows** is an error too, because a walk that quietly
   stopped there would look like a complete export.
+- **A response that is not a list** is an error rather than an empty page.
+  A `data` member that is not an array, and a body carrying no `count`,
+  `results` or `data` at all, both mean something other than the resource
+  answered: a proxy, an error page served with a 200, or a misrouted path.
+  Reporting zero rows there would be indistinguishable from an empty
+  resource. A 9.0 failure envelope is unaffected and still arrives as an
+  `*Error` carrying the server's code and message.
 - **The sequence can be ranged over more than once**, and concurrently; each
   walk starts from the first page.
 - **`Employees.GetByCode`** scans the candidate pages for the exact code,

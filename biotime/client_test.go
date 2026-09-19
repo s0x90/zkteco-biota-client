@@ -752,6 +752,32 @@ func TestPaginationModernAndEnvelopeError(t *testing.T) {
 	}
 }
 
+func TestNonListResponseFailsTheWalk(t *testing.T) {
+	f, srv := newFakeServer(t, Version9, AuthToken)
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		// A proxy, or a misrouted path, answering 200 with something that
+		// is not a list. Yielding nothing here would look like an empty
+		// resource.
+		fmt.Fprint(w, `{"detail":"service index","version":"9.0"}`)
+	}
+	c := newTestClient(t, srv)
+	all, err := Collect(c.Transactions.All(t.Context(), nil))
+	if err == nil || !strings.Contains(err.Error(), "not a list") || len(all) != 0 {
+		t.Fatalf("got %d rows, %v", len(all), err)
+	}
+
+	// A failure envelope still reaches the caller as an *Error carrying the
+	// server's code and message, not as a decoding complaint.
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"code":3,"msg":"boom"}`)
+	}
+	_, err = c.Transactions.List(t.Context(), nil)
+	apiErr, ok := errors.AsType[*Error](err)
+	if !ok || apiErr.Code != 3 || apiErr.Message != "boom" {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestIterationFailsOnEmptyPageWithNextLink(t *testing.T) {
 	f, srv := newFakeServer(t, Version9, AuthToken)
 	f.handler = func(w http.ResponseWriter, r *http.Request) {

@@ -1,8 +1,10 @@
 package biotime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"maps"
@@ -72,23 +74,35 @@ type Page[T any] struct {
 func (p *Page[T]) HasNext() bool { return p.Next != "" }
 
 // UnmarshalJSON implements [json.Unmarshaler].
+//
+// A body that is neither shape is an error rather than an empty page: a
+// decoder that reports "I did not recognize this" as "there was nothing
+// there" turns a misrouted request or an interposed proxy into an export
+// that writes no rows and exits zero.
 func (p *Page[T]) UnmarshalJSON(b []byte) error {
+	// The scalar members are pointers because their presence, not their
+	// value, is what distinguishes a list response from any other object.
 	var raw struct {
-		Count    FlexInt         `json:"count"`
+		Count    *FlexInt        `json:"count"`
 		Next     *string         `json:"next"`
 		Previous *string         `json:"previous"`
 		Results  []T             `json:"results"`
 		Data     json.RawMessage `json:"data"`
-		Code     FlexInt         `json:"code"`
-		Msg      string          `json:"msg"`
+		Code     *FlexInt        `json:"code"`
+		Msg      *string         `json:"msg"`
 	}
 	if err := json.Unmarshal(b, &raw); err != nil {
 		return err
 	}
-	*p = Page[T]{
-		Count: int(raw.Count),
-		Code:  int(raw.Code),
-		Msg:   raw.Msg,
+	*p = Page[T]{}
+	if raw.Count != nil {
+		p.Count = int(*raw.Count)
+	}
+	if raw.Code != nil {
+		p.Code = int(*raw.Code)
+	}
+	if raw.Msg != nil {
+		p.Msg = *raw.Msg
 	}
 	if raw.Next != nil {
 		p.Next = *raw.Next
@@ -96,18 +110,48 @@ func (p *Page[T]) UnmarshalJSON(b []byte) error {
 	if raw.Previous != nil {
 		p.Previous = *raw.Previous
 	}
+
+	data := bytes.TrimSpace(raw.Data)
 	switch {
 	case raw.Results != nil:
 		p.Results = raw.Results
-	case len(raw.Data) > 0 && raw.Data[0] == '[':
-		if err := json.Unmarshal(raw.Data, &p.Results); err != nil {
+
+	case len(data) > 0 && !bytes.Equal(data, []byte("null")):
+		if data[0] != '[' {
+			return fmt.Errorf("biotime: list response carries %s as its \"data\" member, not a list", jsonKind(data))
+		}
+		if err := json.Unmarshal(data, &p.Results); err != nil {
 			return err
 		}
+
+	case len(raw.Data) == 0 && raw.Count == nil && raw.Next == nil &&
+		raw.Previous == nil && raw.Code == nil && raw.Msg == nil:
+		// Not a list response at all: no member of either envelope is
+		// present. A failure envelope carries "code" and reaches the
+		// caller as an *Error, so it must not be caught here.
+		return errors.New("biotime: response is not a list: it has no count, results or data member")
 	}
 	if p.Results == nil {
 		p.Results = []T{}
 	}
 	return nil
+}
+
+// jsonKind names the JSON type of a value for an error message. The value
+// itself is never quoted: a response body holds personal data.
+func jsonKind(b []byte) string {
+	switch b[0] {
+	case '{':
+		return "an object"
+	case '[':
+		return "a list"
+	case '"':
+		return "a string"
+	case 't', 'f':
+		return "a boolean"
+	default:
+		return "a number"
+	}
 }
 
 func (p *Page[T]) envelopeCode() int { return p.Code }
