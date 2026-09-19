@@ -360,10 +360,10 @@ err = client.Do(ctx, http.MethodPost, "/personnel/api/employees/42/photo/", nil,
 Every non-2xx response, and every 9.0 list response with a non-zero `code`,
 is returned as a `*biotime.Error` carrying the status, the request, the
 server's message, any per-field validation messages and the raw body. That
-raw `Body` is the server's own output: a rejected write comes back with the
-values it rejected, and a 500 may carry a traceback. It is there because
-diagnosing an unfamiliar server without it is guesswork, but treat it as
-personal data and keep it out of a log index. Sentinels work with
+raw `Body` is whatever the server chose to send, which can include data:
+some validation errors quote the value they rejected, and a 500 may carry a
+traceback. It is there because diagnosing an unfamiliar server without it is
+guesswork, but treat it as personal data and keep it out of a log index. Sentinels work with
 `errors.Is`:
 
 ```go

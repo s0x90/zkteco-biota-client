@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -517,7 +518,10 @@ func TestEmployeeParamsJSON(t *testing.T) {
 func TestDaylightSavingEdges(t *testing.T) {
 	nyc, err := time.LoadLocation("America/New_York")
 	if err != nil {
-		t.Skip("zone database unavailable:", err)
+		// tzdata_test.go embeds the database, so this cannot be a skip:
+		// a skip reads as green and this test is the only thing pinning
+		// the two hours a year a naive timestamp cannot describe.
+		t.Fatalf("zone database unavailable with time/tzdata embedded: %v", err)
 	}
 	SetLocation(nyc)
 	t.Cleanup(func() { SetLocation(nil) })
@@ -553,6 +557,28 @@ func TestDaylightSavingEdges(t *testing.T) {
 	}
 	if got := ok.String(); got != "2025-06-15 14:05:00" {
 		t.Errorf("ordinary timestamp re-encodes as %q", got)
+	}
+}
+
+// TestHostZoneFollowsTZ makes the west-of-UTC run prove it happened. With
+// no zone database TZ resolves to UTC, and `make test-tz` would still
+// report ok having run the suite a second time in the zone it was trying
+// to get away from.
+func TestHostZoneFollowsTZ(t *testing.T) {
+	tz := os.Getenv("TZ")
+	if tz == "" {
+		return // the plain `make test` run sets none; nothing to check
+	}
+	want, err := time.LoadLocation(tz)
+	if err != nil {
+		t.Fatalf("TZ=%s does not name a zone: %v", tz, err)
+	}
+	now := time.Now()
+	_, wantOffset := now.In(want).Zone()
+	_, gotOffset := now.In(time.Local).Zone()
+	if gotOffset != wantOffset {
+		t.Fatalf("TZ=%s asks for UTC%+d but the process runs at UTC%+d; the zone database did not take effect",
+			tz, wantOffset/3600, gotOffset/3600)
 	}
 }
 

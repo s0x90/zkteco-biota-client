@@ -49,8 +49,8 @@ the guarantees it tries to keep:
   An identifier passed directly to a lookup is echoed back in its own
   error, for example the code given to `GetByCode`: an error names what it
   could not find.
-- `Error.Body` holds the server's raw response, which is where the server
-  puts its own data: a rejected write is echoed back with the values it
+- `Error.Body` holds the server's raw response, whatever it chose to send.
+  That can include data: some validation errors quote the value they
   rejected, and a 500 may carry a traceback. It is kept because diagnosing
   an unfamiliar server without it is guesswork. Treat it as personal data:
   read it while debugging, do not ship it to a log index.
