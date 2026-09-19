@@ -42,10 +42,13 @@ the guarantees it tries to keep:
 
 - The API token and the configured password are never written to a log or
   an error message.
-- No error message or log line renders a request's query string, which holds
-  filter values such as employee names and codes. The complete address stays
-  on `Error.URL` for callers who want it, so log that field only where the
-  query is safe in your logs.
+- No error message or log line renders a request's query string, so the
+  filter values a list call sends, employee names and codes among them, do
+  not reach either. The complete address stays on `Error.URL` for callers
+  who want it, so log that field only where the query is safe in your logs.
+  An identifier passed directly to a lookup is echoed back in its own
+  error, for example the code given to `GetByCode`: an error names what it
+  could not find.
 - A base URL carrying credentials is refused at construction, because it
   would be rendered wherever the address is printed.
 - A device PIN returned by the server is held in a `Secret`, which prints

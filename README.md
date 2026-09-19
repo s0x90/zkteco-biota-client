@@ -495,10 +495,13 @@ from a live server:
 
 ```sh
 BIOTIME_URL=http://biotime.example.com:8080 BIOTIME_USER=admin BIOTIME_PASS=secret \
-  go run ./examples/basic -version 8 -jwt -since 24h
+  go run ./examples/basic -version 8 -jwt -since 24h -tz Europe/Moscow
 ```
 
-Add `-debug` to log every request.
+Pass `-tz` the zone the server keeps its wall-clock times in; without it the
+host's own zone is assumed, which shifts both the window requested and every
+timestamp printed. The program reports the zone it is using on its first
+line. Add `-debug` to log every request.
 
 ## Notes on 8.x servers
 

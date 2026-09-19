@@ -1,7 +1,11 @@
 // Command basic demonstrates the biotime client against a live server.
 //
 //	BIOTIME_URL=http://biotime.example.com:8080 BIOTIME_USER=admin BIOTIME_PASS=secret \
-//	  go run ./examples/basic -version 8 -since 24h
+//	  go run ./examples/basic -version 8 -since 24h -tz Europe/Moscow
+//
+// Pass -tz the zone the server keeps its wall-clock times in. Without it the
+// host's own zone is assumed, which shifts both the window requested and
+// every timestamp printed.
 package main
 
 import (
@@ -16,34 +20,59 @@ import (
 	"github.com/s0x90/zkteco-biota-client/biotime"
 )
 
+// options are the command's flags. They are grouped rather than passed
+// positionally: two of them are bools, and adjacent bool parameters are how
+// a call site ends up meaning the opposite of what it reads.
+type options struct {
+	version int
+	jwt     bool
+	since   time.Duration
+	debug   bool
+	tz      string
+}
+
 func main() {
-	version := flag.Int("version", 9, "server generation: 8 for legacy BioTime, 9 for ZKBio Time 9.0")
-	jwt := flag.Bool("jwt", false, "authenticate with /jwt-api-token-auth/ (Authorization: JWT) instead of /api-token-auth/")
-	since := flag.Duration("since", 24*time.Hour, "list punches recorded within this duration")
-	debug := flag.Bool("debug", false, "log every request")
+	var o options
+	flag.IntVar(&o.version, "version", 9, "server generation: 8 for legacy BioTime, 9 for ZKBio Time 9.0")
+	flag.BoolVar(&o.jwt, "jwt", false, "authenticate with /jwt-api-token-auth/ (Authorization: JWT) instead of /api-token-auth/")
+	flag.DurationVar(&o.since, "since", 24*time.Hour, "list punches recorded within this duration")
+	flag.BoolVar(&o.debug, "debug", false, "log every request")
+	flag.StringVar(&o.tz, "tz", "", "IANA zone the server keeps its wall-clock times in (default: this host's zone)")
 	flag.Parse()
 
-	if err := run(*version, *jwt, *since, *debug); err != nil {
+	if err := run(o); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-func run(version int, jwt bool, since time.Duration, debug bool) error {
+func run(o options) error {
 	baseURL := os.Getenv("BIOTIME_URL")
 	if baseURL == "" {
 		return errors.New("BIOTIME_URL is not set")
 	}
 
+	// The server stores wall-clock times with no zone, so the client has to
+	// be told which one. Getting it wrong shifts the window requested below
+	// and every timestamp printed, without any error.
+	if o.tz != "" {
+		loc, err := time.LoadLocation(o.tz)
+		if err != nil {
+			return fmt.Errorf("bad -tz: %w", err)
+		}
+		biotime.SetLocation(loc)
+	}
+	fmt.Printf("reading the server's timestamps as %s\n", biotime.Location())
+
 	opts := []biotime.Option{
-		biotime.WithVersion(biotime.Version(version)),
+		biotime.WithVersion(biotime.Version(o.version)),
 		biotime.WithCredentials(os.Getenv("BIOTIME_USER"), os.Getenv("BIOTIME_PASS")),
 		biotime.WithTimeout(15 * time.Second),
 	}
-	if jwt {
+	if o.jwt {
 		opts = append(opts, biotime.WithAuthScheme(biotime.AuthJWT))
 	}
-	if debug {
+	if o.debug {
 		opts = append(opts, biotime.WithLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))))
 	}
 
@@ -88,9 +117,9 @@ func run(version int, jwt bool, since time.Duration, debug bool) error {
 		fmt.Printf("  %-8s %-30s %s\n", e.EmpCode, e.FirstName+" "+e.LastName, dept)
 	}
 
-	fmt.Printf("== Punches since %s\n", since)
+	fmt.Printf("== Punches since %s\n", o.since)
 	filter := &biotime.TransactionFilter{
-		StartTime:   time.Now().Add(-since),
+		StartTime:   time.Now().Add(-o.since),
 		ListOptions: biotime.ListOptions{PageSize: 100, Ordering: "punch_time,id"},
 	}
 	var n int
