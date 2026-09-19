@@ -62,7 +62,12 @@ func run(o options) error {
 		}
 		biotime.SetLocation(loc)
 	}
-	fmt.Printf("reading the server's timestamps as %s\n", biotime.Location())
+	// time.Local prints as the word "Local", which names the mechanism and
+	// not the zone, so report the offset actually in force: that is the
+	// number to compare against the server's.
+	now := time.Now().In(biotime.Location())
+	fmt.Printf("reading the server's timestamps as %s (UTC%s right now)\n",
+		biotime.Location(), now.Format("-07:00"))
 
 	opts := []biotime.Option{
 		biotime.WithVersion(biotime.Version(o.version)),
