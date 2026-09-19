@@ -489,6 +489,12 @@ var errMalformedObject = errors.New("biotime: malformed JSON object")
 // The scan is structural only (strings, nesting, separators) and relies on b
 // being valid JSON; it never panics on invalid input but may report it as
 // errMalformedObject rather than pinpoint it.
+//
+// One deliberate difference from [encoding/json]: a key holding invalid
+// UTF-8, which a server that answers in a legacy encoding produces, is
+// reported with its bytes unchanged, where the decoder would replace each
+// invalid byte with U+FFFD. FuzzObjectMembers holds the two to account on
+// everything else.
 func objectMembers(b []byte, fn func(key, value []byte) error) error {
 	i := skipSpace(b, 0)
 	if i >= len(b) || b[i] != '{' {

@@ -40,6 +40,13 @@ go test -race ./...
 Formatting (gofumpt and goimports) is enforced by golangci-lint; `make fmt`
 applies it in place.
 
+`objectMembers`, the hand-rolled JSON scanner that finds the members
+`Extra` keeps, is covered by `FuzzObjectMembers`, which holds it to what
+`encoding/json` does with the same bytes. Its seeds run as part of `make
+test`; explore from them with
+`go test ./biotime -run FuzzObjectMembers -fuzz FuzzObjectMembers` after
+touching that code.
+
 `make lint` runs exactly the checks CI runs and reports every failing check,
 not just the first. It needs network access: govulncheck downloads the
 vulnerability database on every run, and a fetch error there is a network
@@ -121,6 +128,12 @@ functions, add a test or an example that exercises them in the same change.
 variables are not covered by any check, so tests for those are on you and your
 reviewer.
 
+`Example` functions in test files are exempt. One without an `Output:`
+comment is compiled and never run, which is deliberate for an example that
+needs a live server: the compiler keeps it from drifting away from the API,
+the way a code block in a doc comment does. The Makefile drops those
+findings and nothing else.
+
 Tests run against an in-process fake server (`newFakeServer` in
 `client_test.go`) that speaks both the 8.x and the 9.0 dialect. A behavior
 observed on a real server belongs there as a fixture, with the generation and
@@ -160,8 +173,12 @@ and an optional body explaining the "why" behind the change.
 
 ## Reporting issues
 
-Open an issue on GitHub with steps to reproduce, expected behavior, and actual
-behavior. Include your Go version and the server version (8.x or 9.0, and the
+**Security issues go to [SECURITY.md](SECURITY.md), not to the issue
+tracker.** Use GitHub's private reporting form so that a fix can ship before
+the details are public.
+
+For everything else, open an issue on GitHub with steps to reproduce,
+expected behavior, and actual behavior. Include your Go version and the server version (8.x or 9.0, and the
 build if you know it): the two generations differ in enough details that a
 report without it is hard to act on. When the server answered something
 unexpected, the raw body from `Error.Body` or a `WithLogger` debug trace

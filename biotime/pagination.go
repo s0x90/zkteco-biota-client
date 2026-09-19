@@ -267,6 +267,12 @@ func nextQuery(cur url.Values, next string) (url.Values, error) {
 
 // Collect drains an iterator produced by one of the All methods into a slice.
 // It stops at the first error and returns the objects gathered so far.
+//
+// Everything the walk yields is held at once, so use it for collections
+// that are bounded by the size of the organization, such as departments,
+// areas and positions. Punches and employees run into the millions on a
+// live server; range over the iterator instead, which is what the All
+// methods return one for.
 func Collect[T any](seq iter.Seq2[T, error]) ([]T, error) {
 	var out []T
 	for item, err := range seq {

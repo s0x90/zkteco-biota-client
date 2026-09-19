@@ -129,10 +129,15 @@ lint-govulncheck: $(BIN)/govulncheck
 # deadcode exits zero even when it finds something, so fail on any output. The
 # -f template emits GitHub workflow commands so findings show up as inline
 # annotations on the PR diff; locally they are still readable.
+# Example functions without an "Output:" comment are compiled and never run,
+# which is the point of them: they document an API that needs a live server
+# and the compiler keeps them honest. Nothing calls them, so deadcode is
+# right and useless here; drop only those, matched on the test file and the
+# Example prefix together so a real finding cannot hide behind the filter.
 lint-deadcode: $(BIN)/deadcode
 	@out="$$($(BIN)/deadcode -test \
 		-f '{{range .Funcs}}::error file={{.Position.File}},line={{.Position.Line}},col={{.Position.Col}}::unreachable func: {{.Name}}{{"\n"}}{{end}}' \
-		./...)"; \
+		./... | grep -vE '_test\.go,[^:]*::unreachable func: Example' || true)"; \
 	if [ -n "$$out" ]; then \
 		n=$$(printf '%s\n' "$$out" | wc -l | tr -d ' '); \
 		echo "Found $$n unreachable function(s) no test or example reaches."; \

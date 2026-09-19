@@ -28,31 +28,9 @@
 // start-up. A zone that observes daylight saving cannot describe two hours
 // a year; see [SetLocation] for what happens to them.
 //
-// Basic usage:
-//
-//	// The zone the server keeps its wall-clock times in.
-//	loc, err := time.LoadLocation("Europe/Moscow")
-//	if err != nil {
-//		return err
-//	}
-//	biotime.SetLocation(loc)
-//
-//	client, err := biotime.New("http://biotime.example.com:8080",
-//		biotime.WithVersion(biotime.Version8),
-//		biotime.WithCredentials("admin", "secret"),
-//	)
-//	if err != nil {
-//		return err
-//	}
-//
-//	for tx, err := range client.Transactions.All(ctx, &biotime.TransactionFilter{
-//		StartTime: time.Now().Add(-24 * time.Hour),
-//	}) {
-//		if err != nil {
-//			return err
-//		}
-//		fmt.Println(tx.EmpCode, tx.PunchTime, tx.PunchState)
-//	}
-//
 // Endpoints that this package does not model can be reached with [Client.Do].
+//
+// The example below is the shape of a program that uses this package. It is
+// compiled on every test run rather than written out here as prose, so that
+// it cannot drift away from the API.
 package biotime

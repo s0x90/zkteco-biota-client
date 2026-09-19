@@ -232,6 +232,11 @@ for e, err := range client.Employees.All(ctx, nil) {
 depts, err := biotime.Collect(client.Departments.All(ctx, nil))
 ```
 
+`Collect` holds everything the walk yields at once, so it suits collections
+bounded by the size of the organization: departments, areas, positions.
+Punches and employees run into the millions on a live server, and ranging
+over the iterator is what keeps one page in memory at a time.
+
 - **Filters** are typed per resource (`EmployeeFilter`, `TransactionFilter`,
   …) and embed `ListOptions` for `Page`, `PageSize`, `Ordering` and `Search`.
   A nil filter lists everything.
