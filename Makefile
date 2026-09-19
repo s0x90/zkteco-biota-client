@@ -26,7 +26,7 @@ GO_STAMP    := $(BIN)/.go-$(GO_PLATFORM)
 
 .DEFAULT_GOAL := help
 
-.PHONY: help tools tools-tidy clean fmt lint check-ci check-lint-expands $(addprefix lint-,$(TOOLS)) test test-tz build
+.PHONY: help tools tools-tidy clean fmt lint check-ci check-lint-expands $(addprefix lint-,$(TOOLS)) test test-tz build build-32
 
 # If `go list tool` failed, TOOLS is empty, so `tools` and `lint` would have no
 # prerequisites and make would report success having done nothing.
@@ -157,6 +157,16 @@ build:
 	 fi
 	@test "$$(go list -m all)" = "$$(go list -m)" || { \
 	   echo "error: go.mod pulls in other modules; the client must stay dependency-free" >&2; exit 1; }
+
+## build-32: compile and vet for a 32-bit target, where int is 32 bits wide
+# FlexInt range-checks against int, not int64, because this client runs on
+# 32-bit hosts (a Raspberry Pi beside the door controller). Nothing else in
+# the pipeline would notice that breaking: vet type-checks the tests too, so
+# the 32-bit-only branches compile here. Running the suite there needs a
+# 32-bit host, which is not worth a runner.
+build-32:
+	GOOS=linux GOARCH=386 go build ./...
+	GOOS=linux GOARCH=386 go vet ./...
 
 ## test: run the test suite with race detection (COVERPROFILE=file writes coverage)
 COVERPROFILE ?=

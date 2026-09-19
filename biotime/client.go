@@ -20,6 +20,7 @@ const (
 	defaultUserAgent = "zkteco-biotime-go-client"
 	defaultLanguage  = "en"
 	defaultMaxBody   = 32 << 20
+	defaultType      = "application/json"
 	// loginBackoff is how long an automatic re-login stays suspended after
 	// the server rejected the credentials. Without it, every request in
 	// flight when a token expires would retry the login with the same bad
@@ -286,12 +287,30 @@ func (c *Client) refreshToken(ctx context.Context, rejected string) (string, err
 	return c.Login(ctx)
 }
 
+// TypedBody is a request body with an explicit Content-Type, for the
+// endpoints [Client.Do] reaches that do not take JSON, such as a photo
+// upload. Content follows the same rules as the body parameter of
+// [Client.Do]: an [io.Reader], a []byte or a [json.RawMessage] is sent
+// unchanged, anything else is encoded as JSON. An empty ContentType means
+// "application/json".
+//
+//	f, err := os.Open("badge.png")
+//	...
+//	err = client.Do(ctx, http.MethodPost, path, nil,
+//		biotime.TypedBody{ContentType: "image/png", Content: f}, nil)
+type TypedBody struct {
+	ContentType string
+	Content     any
+}
+
 // Do performs an authenticated request against an arbitrary API path and
 // decodes the JSON response into out (which may be nil). It is the escape
 // hatch for endpoints this package does not model. path is relative to the
 // base URL, for example "/att/api/manualLogs/". body, when non-nil, is
 // encoded as JSON unless it is an [io.Reader], a []byte or a
-// [json.RawMessage], which are sent as is.
+// [json.RawMessage], which are sent unchanged. Every body is sent as
+// "application/json" unless it is wrapped in a [TypedBody], which names the
+// Content-Type.
 func (c *Client) Do(ctx context.Context, method, path string, query url.Values, body, out any) error {
 	return c.request(ctx, method, path, query, body, out, true)
 }
@@ -309,6 +328,25 @@ func (c *Client) Post(ctx context.Context, path string, body, out any) error {
 // request executes one API call, retrying once with a fresh token when the
 // server answers 401 and credentials are available.
 func (c *Client) request(ctx context.Context, method, path string, query url.Values, body, out any, auth bool) error {
+	// Both forms are unwrapped: a *TypedBody that fell through would be
+	// JSON-encoded as the wrapper struct and sent to the server as such.
+	contentType := defaultType
+	switch tb := body.(type) {
+	case TypedBody:
+		contentType, body = tb.ContentType, tb.Content
+	case *TypedBody:
+		if tb == nil {
+			return errors.New("biotime: nil *TypedBody")
+		}
+		contentType, body = tb.ContentType, tb.Content
+	}
+	if contentType == "" {
+		contentType = defaultType
+	}
+	if !validHeaderValue(contentType) {
+		return fmt.Errorf("biotime: invalid Content-Type %q", contentType)
+	}
+
 	payload, err := encodeBody(body, c.maxBody)
 	if err != nil {
 		return err
@@ -331,7 +369,7 @@ func (c *Client) request(ctx context.Context, method, path string, query url.Val
 		}
 	}
 
-	status, respBody, err := c.send(ctx, method, target, payload, token)
+	status, respBody, err := c.send(ctx, method, target, payload, contentType, token)
 	if err != nil {
 		return err
 	}
@@ -341,7 +379,7 @@ func (c *Client) request(ctx context.Context, method, path string, query url.Val
 			return err
 		}
 		if fresh != "" {
-			status, respBody, err = c.send(ctx, method, target, payload, fresh)
+			status, respBody, err = c.send(ctx, method, target, payload, contentType, fresh)
 			if err != nil {
 				return err
 			}
@@ -376,7 +414,7 @@ type envelope interface {
 
 // send performs a single HTTP exchange and reads the whole body, up to the
 // configured size limit.
-func (c *Client) send(ctx context.Context, method string, target *url.URL, payload []byte, token string) (status int, body []byte, err error) {
+func (c *Client) send(ctx context.Context, method string, target *url.URL, payload []byte, contentType, token string) (status int, body []byte, err error) {
 	var reader io.Reader
 	if payload != nil {
 		reader = bytes.NewReader(payload)
@@ -391,7 +429,7 @@ func (c *Client) send(ctx context.Context, method string, target *url.URL, paylo
 		req.Header.Set("Accept-Language", c.language)
 	}
 	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", contentType)
 	}
 	if token != "" {
 		req.Header.Set("Authorization", string(c.scheme)+" "+token)

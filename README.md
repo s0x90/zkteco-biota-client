@@ -325,6 +325,22 @@ err := client.Do(ctx, http.MethodPost, "/att/api/manualLogs/", nil, map[string]a
 Route names differ between generations for some of them: manual logs live at
 `/att/api/manualLogs/` on 9.0 and at `/att/api/manuallogs/` on 8.x.
 
+Bodies are sent as `application/json` unless wrapped in a `TypedBody`, which
+names the `Content-Type` for the endpoints that take something else, such as
+a photo upload. An `io.Reader`, a `[]byte` and a `json.RawMessage` are sent
+unchanged either way:
+
+```go
+f, err := os.Open("badge.png")
+if err != nil {
+	return err
+}
+defer f.Close()
+
+err = client.Do(ctx, http.MethodPost, "/personnel/api/employees/42/photo/", nil,
+	biotime.TypedBody{ContentType: "image/png", Content: f}, nil)
+```
+
 ## Errors
 
 Every non-2xx response, and every 9.0 list response with a non-zero `code`,
@@ -384,6 +400,27 @@ biotime.SetLocation(loc)
 The setting is package wide: one process talks to servers in one zone.
 Construct dates with `biotime.NewDate(t)`, which takes the calendar date of
 `t` in that zone, the date the server would record for it.
+
+### Daylight saving
+
+A naive timestamp cannot say which side of a daylight saving transition it
+belongs to, so two hours a year are not recoverable from what the server
+sends, and neither is reported as an error:
+
+- The hour a transition **skips** does not exist in the zone. A timestamp
+  inside it is normalized to a neighboring instant, so it does not round
+  trip: with `America/New_York` configured, `2025-03-09 02:30:00` decodes to
+  `01:30:00 -0500` and re-encodes as `2025-03-09 01:30:00`. A terminal whose
+  clock does not follow the local rules can upload such a punch.
+- The hour a transition **repeats** exists twice. A timestamp inside it
+  resolves to the earlier instant, so half of those punches are an hour off
+  as instants, and an export sorted by decoded time interleaves them with
+  the hour before.
+
+Run the server in a zone without daylight saving, UTC being the obvious
+choice, and neither case can arise. Where that is not possible, treat the
+hour around each transition as unreliable and compare punches by their
+wall-clock string rather than by instant.
 
 ## Exporting punches
 

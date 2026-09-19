@@ -42,6 +42,12 @@ func Location() *time.Location {
 // match the server's zone; the default of [time.Local] is wrong whenever the
 // program runs in a different zone than the server, which is the norm in
 // containers. Passing nil restores [time.Local].
+//
+// A zone that observes daylight saving cannot express every timestamp the
+// server may send: the hour a transition skips does not exist, and the hour
+// it repeats is ambiguous. Neither is reported as an error; see parseTime
+// for what happens instead. A server kept in UTC, or any zone without
+// daylight saving, has neither problem.
 func SetLocation(loc *time.Location) { location.Store(loc) }
 
 // dateTimeLayouts lists the timestamp formats observed across server
@@ -152,6 +158,15 @@ func (d *Date) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// parseTime resolves a naive timestamp against [Location].
+//
+// Two wall-clock times per year cannot be resolved from the input alone,
+// and neither is reported as an error: one inside the hour a daylight
+// saving transition skips does not exist, and [time.ParseInLocation]
+// normalizes it to a neighboring instant, so it does not round-trip; one
+// inside the hour a transition repeats exists twice, and resolves to the
+// earlier of the two. Run the server in a zone without daylight saving to
+// avoid both. See [SetLocation].
 func parseTime(s string, layouts []string) (time.Time, error) {
 	loc := Location()
 	for _, layout := range layouts {

@@ -458,6 +458,52 @@ func TestEmployeeParamsJSON(t *testing.T) {
 	}
 }
 
+// TestDaylightSavingEdges pins what a zone with daylight saving does to the
+// two hours a year a naive timestamp cannot describe. Neither is an error:
+// see parseTime and the README. The test exists so that a change to either
+// is deliberate.
+func TestDaylightSavingEdges(t *testing.T) {
+	nyc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skip("zone database unavailable:", err)
+	}
+	SetLocation(nyc)
+	t.Cleanup(func() { SetLocation(nil) })
+
+	// The hour the spring transition skips does not exist: the value is
+	// normalized to a neighboring instant and does not round-trip.
+	var gap DateTime
+	if err := gap.UnmarshalJSON([]byte(`"2025-03-09 02:30:00"`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := gap.String(); got != "2025-03-09 01:30:00" {
+		t.Errorf("skipped hour re-encodes as %q", got)
+	}
+
+	// The hour the autumn transition repeats exists twice: the earlier of
+	// the two instants is chosen, an hour before the other one.
+	var dup DateTime
+	if err := dup.UnmarshalJSON([]byte(`"2025-11-02 01:30:00"`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := dup.UTC().Format(time.RFC3339); got != "2025-11-02T05:30:00Z" {
+		t.Errorf("repeated hour resolves to %s, want the earlier instant", got)
+	}
+	if got := dup.String(); got != "2025-11-02 01:30:00" {
+		t.Errorf("repeated hour re-encodes as %q", got)
+	}
+
+	// Every other timestamp round-trips, which is the point of pinning the
+	// two that do not.
+	var ok DateTime
+	if err := ok.UnmarshalJSON([]byte(`"2025-06-15 14:05:00"`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := ok.String(); got != "2025-06-15 14:05:00" {
+		t.Errorf("ordinary timestamp re-encodes as %q", got)
+	}
+}
+
 func TestPunchStateString(t *testing.T) {
 	var tx Transaction
 	if err := json.Unmarshal([]byte(`{"punch_state":"1","verify_type":15}`), &tx); err != nil {

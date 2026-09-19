@@ -29,6 +29,7 @@ go test -race ./...
 
    ```bash
    make build
+   make build-32
    make test
    make test-tz
    make lint
@@ -57,6 +58,12 @@ module gains a dependency: this client is dependency-free by design.
 `DateTime` interpret the server's naive timestamps in the configured zone, and
 a test that accidentally relies on the host zone would pass on a runner at or
 east of UTC and fail elsewhere.
+
+`make build-32` compiles and vets for a 32-bit target. `FlexInt` range-checks
+decoded values against `int` rather than `int64` because this client runs on
+32-bit hosts, and nothing else in the pipeline would notice that breaking.
+Vet type-checks the test files too, so the branches that only exist on a
+32-bit target are compiled there.
 
 Adding or removing a tool means touching three places: the `tool` directives in
 `internal/tools/go.mod`, the matching `lint-*` target in the `Makefile`, and the

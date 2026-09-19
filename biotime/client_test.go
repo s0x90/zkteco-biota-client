@@ -1199,6 +1199,74 @@ func TestErrorParsing(t *testing.T) {
 	}
 }
 
+func TestTypedBody(t *testing.T) {
+	f, srv := newFakeServer(t, Version9, AuthToken)
+	f.handler = func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{}`) }
+	c := newTestClient(t, srv)
+	png := "\x89PNG\r\n\x1a\n binary"
+
+	// A plain body keeps the package default.
+	if err := c.Post(t.Context(), "/x/", map[string]any{"a": 1}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.lastRequest().Header.Get("Content-Type"); got != "application/json" {
+		t.Errorf("default content type %q", got)
+	}
+
+	// Both the value and the pointer form are unwrapped: a *TypedBody that
+	// fell through would be JSON-encoded as the wrapper struct.
+	for name, body := range map[string]any{
+		"value":   TypedBody{ContentType: "image/png", Content: strings.NewReader(png)},
+		"pointer": &TypedBody{ContentType: "image/png", Content: []byte(png)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := c.Post(t.Context(), "/personnel/api/employees/42/photo/", body, nil); err != nil {
+				t.Fatal(err)
+			}
+			if got := f.lastRequest().Header.Get("Content-Type"); got != "image/png" {
+				t.Errorf("content type %q", got)
+			}
+			if got := string(f.lastBody()); got != png {
+				t.Errorf("body %q, want the bytes unchanged", got)
+			}
+		})
+	}
+
+	// An empty ContentType means the default; Content still follows the
+	// rules of the body parameter, so a struct is encoded as JSON.
+	if err := c.Post(t.Context(), "/x/", TypedBody{Content: map[string]any{"a": 1}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.lastRequest().Header.Get("Content-Type"); got != "application/json" {
+		t.Errorf("empty content type %q", got)
+	}
+	if got := string(f.lastBody()); got != `{"a":1}` {
+		t.Errorf("body %q", got)
+	}
+
+	// The type is validated once here rather than by the transport on every
+	// request, and a nil pointer is refused rather than dereferenced.
+	if err := c.Post(t.Context(), "/x/", TypedBody{ContentType: "image/png\n", Content: []byte("x")}, nil); err == nil ||
+		!strings.Contains(err.Error(), "invalid Content-Type") {
+		t.Errorf("got %v", err)
+	}
+	if err := c.Post(t.Context(), "/x/", (*TypedBody)(nil), nil); err == nil || !strings.Contains(err.Error(), "nil *TypedBody") {
+		t.Errorf("got %v", err)
+	}
+
+	// The type survives the re-authentication retry, which replays the body.
+	f.reject.Store(1)
+	if err := c.Post(t.Context(), "/x/", TypedBody{ContentType: "image/png", Content: []byte(png)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.lastRequest().Header.Get("Content-Type"); got != "image/png" {
+		t.Errorf("content type after retry %q", got)
+	}
+	if got := string(f.lastBody()); got != png {
+		t.Errorf("body after retry %q", got)
+	}
+}
+
 func TestPrintedURLsDropUserinfo(t *testing.T) {
 	// New refuses such an address, so these guard the paths that render one
 	// should it ever arrive by another route.
