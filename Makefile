@@ -134,10 +134,19 @@ lint-govulncheck: $(BIN)/govulncheck
 # and the compiler keeps them honest. Nothing calls them, so deadcode is
 # right and useless here; drop only those, matched on the test file and the
 # Example prefix together so a real finding cannot hide behind the filter.
+# deadcode exits zero when it finds something, so the findings are read from
+# its output. That makes its exit status the only signal that it ran at all:
+# a tool that dies prints nothing, and nothing would otherwise read as "no
+# unreachable functions". Check the status before the output.
 lint-deadcode: $(BIN)/deadcode
-	@out="$$($(BIN)/deadcode -test \
+	@raw=$$($(BIN)/deadcode -test \
 		-f '{{range .Funcs}}::error file={{.Position.File}},line={{.Position.Line}},col={{.Position.Col}}::unreachable func: {{.Name}}{{"\n"}}{{end}}' \
-		./... | grep -vE '_test\.go,[^:]*::unreachable func: Example' || true)"; \
+		./...); status=$$?; \
+	if [ $$status -ne 0 ]; then \
+		echo "error: deadcode exited $$status; the unreachable-function check did not run" >&2; \
+		exit $$status; \
+	fi; \
+	out=$$(printf '%s' "$$raw" | grep -vE '_test\.go,[^:]*::unreachable func: Example' || true); \
 	if [ -n "$$out" ]; then \
 		n=$$(printf '%s\n' "$$out" | wc -l | tr -d ' '); \
 		echo "Found $$n unreachable function(s) no test or example reaches."; \

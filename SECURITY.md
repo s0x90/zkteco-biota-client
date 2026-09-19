@@ -42,8 +42,10 @@ the guarantees it tries to keep:
 
 - The API token and the configured password are never written to a log or
   an error message.
-- No error or log line carries a request's query string, which holds filter
-  values such as employee names and codes.
+- No error message or log line renders a request's query string, which holds
+  filter values such as employee names and codes. The complete address stays
+  on `Error.URL` for callers who want it, so log that field only where the
+  query is safe in your logs.
 - A base URL carrying credentials is refused at construction, because it
   would be rendered wherever the address is printed.
 - A device PIN returned by the server is held in a `Secret`, which prints

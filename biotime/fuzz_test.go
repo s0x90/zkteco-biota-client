@@ -1,6 +1,7 @@
 package biotime
 
 import (
+	"bytes"
 	"encoding/json"
 	"slices"
 	"strings"
@@ -26,6 +27,9 @@ func FuzzObjectMembers(f *testing.F) {
 		`{"a":null,"b":true,"c":-1.5e10}`,
 		`{"nested":{"deep":[{"x":"]"},[["}"]]]}}`,
 		`{"esc":"\\","accented":"caf\u00e9"}`,
+		// Values a decode-and-compare oracle would round together.
+		`{"a":1.50,"b":1.5}`,
+		`{"a":10000000000000000001,"b":10000000000000000002}`,
 		`{"":""}`,
 		`{"a":1,"a":2}`,
 		// A key the server sent in a non-UTF-8 encoding.
@@ -60,27 +64,16 @@ func FuzzObjectMembers(f *testing.F) {
 			if !ok {
 				t.Fatalf("%q: scanner missed key %q", in, key)
 			}
-			if !sameJSON(t, gotVal, wantVal) {
+			// Compared as bytes, not as decoded values: the scanner slices
+			// the input, and decoding both sides would round 1.50 and 1.5,
+			// or two different 20-digit integers, into the same float64 and
+			// hide exactly the off-by-one this is meant to catch. The two
+			// agree byte for byte, internal whitespace included.
+			if !bytes.Equal(bytes.TrimSpace(gotVal), bytes.TrimSpace(wantVal)) {
 				t.Fatalf("%q: key %q: scanner read %q, encoding/json read %q", in, key, gotVal, wantVal)
 			}
 		}
 	})
-}
-
-// sameJSON reports whether two raw values mean the same thing. The bytes
-// themselves may differ by insignificant whitespace.
-func sameJSON(t *testing.T, a, b json.RawMessage) bool {
-	t.Helper()
-	var av, bv any
-	if err := json.Unmarshal(a, &av); err != nil {
-		t.Fatalf("scanner produced %q, which does not decode: %v", a, err)
-	}
-	if err := json.Unmarshal(b, &bv); err != nil {
-		return true // encoding/json handed back something it cannot re-read
-	}
-	ab, _ := json.Marshal(av)
-	bb, _ := json.Marshal(bv)
-	return string(ab) == string(bb)
 }
 
 func sortedKeys(m map[string]json.RawMessage) []string {
