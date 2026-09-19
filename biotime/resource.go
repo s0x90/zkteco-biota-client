@@ -2,10 +2,19 @@ package biotime
 
 import (
 	"context"
+	"errors"
 	"iter"
 	"net/http"
 	"net/url"
 )
+
+// errNilParams is returned instead of sending the JSON literal null, which
+// no endpoint means to accept and which a lenient one answers 2xx to. It is
+// refused here, at the one place every write passes through, rather than in
+// the services: [EmployeeService.Create] and [EmployeeService.Update] read
+// the params again after the write, and a nil that reached them would panic
+// with the record already changed.
+var errNilParams = errors.New("biotime: nil params")
 
 // queryFilter is implemented by the per-resource *Filter types. A nil
 // pointer must yield an empty query.
@@ -57,6 +66,9 @@ func newResource[T, P any, F queryFilter](c *Client, path string) resource[T, P,
 // Create adds an object. The fields the server requires are documented on
 // the params type.
 func (r *resource[T, P, F]) Create(ctx context.Context, params *P) (*T, error) {
+	if params == nil {
+		return nil, errNilParams
+	}
 	var v T
 	if err := r.c.Post(ctx, r.path, params, &v); err != nil {
 		return nil, err
@@ -66,6 +78,9 @@ func (r *resource[T, P, F]) Create(ctx context.Context, params *P) (*T, error) {
 
 // Update changes the provided fields of an object (HTTP PATCH).
 func (r *resource[T, P, F]) Update(ctx context.Context, id int, params *P) (*T, error) {
+	if params == nil {
+		return nil, errNilParams
+	}
 	var v T
 	if err := r.c.Do(ctx, http.MethodPatch, detailPath(r.path, id), nil, params, &v); err != nil {
 		return nil, err

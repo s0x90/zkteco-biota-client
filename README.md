@@ -265,7 +265,9 @@ depts, err := biotime.Collect(client.Departments.All(ctx, nil))
   because some servers match `emp_code` as a prefix. It gives up after 1000
   candidates with an error matching `ErrTooManyCandidates`: a code that
   short on a personnel table that large is better looked up with `List` and
-  the server's exact-match parameters.
+  the server's exact-match parameters. An empty code matches `ErrNotFound`
+  without a request, since an empty filter value would be omitted from the
+  query and list the whole table.
 
 ## Creating and updating
 

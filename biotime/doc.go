@@ -19,7 +19,23 @@
 //
 // Select the server generation with [WithVersion]; everything else is shared.
 //
+// # Time zones
+//
+// The server stores and returns wall-clock times with no zone. The client
+// interprets them in the zone returned by [Location], which defaults to
+// [time.Local] and is therefore wrong whenever the program does not run in
+// the server's zone, the norm in containers. Call [SetLocation] once at
+// start-up. A zone that observes daylight saving cannot describe two hours
+// a year; see [SetLocation] for what happens to them.
+//
 // Basic usage:
+//
+//	// The zone the server keeps its wall-clock times in.
+//	loc, err := time.LoadLocation("Europe/Moscow")
+//	if err != nil {
+//		return err
+//	}
+//	biotime.SetLocation(loc)
 //
 //	client, err := biotime.New("http://biotime.example.com:8080",
 //		biotime.WithVersion(biotime.Version8),

@@ -362,7 +362,14 @@ func (s *EmployeeService) Get(ctx context.Context, id int) (*Employee, error) {
 // candidates with an error matching [ErrTooManyCandidates]; a code that
 // short on a server that large is better looked up with
 // [EmployeeService.List] and the server's own exact-match parameters.
+//
+// An empty code matches [ErrNotFound] without a request: no employee has
+// one, and an empty filter value is omitted from the query, so asking would
+// list the whole personnel table one page at a time.
 func (s *EmployeeService) GetByCode(ctx context.Context, empCode string) (*Employee, error) {
+	if empCode == "" {
+		return nil, employeeNotFound("employee code is empty")
+	}
 	filter := &EmployeeFilter{EmpCode: empCode, ListOptions: ListOptions{PageSize: 100}}
 	seen := 0
 	for e, err := range s.All(ctx, filter) {
@@ -377,5 +384,11 @@ func (s *EmployeeService) GetByCode(ctx context.Context, empCode string) (*Emplo
 			return nil, fmt.Errorf("%w: employee code %q matched at least %d records as a prefix; use List with an exact filter", ErrTooManyCandidates, empCode, maxCodeCandidates)
 		}
 	}
-	return nil, &Error{StatusCode: http.StatusNotFound, Method: http.MethodGet, URL: employeesPath, Message: "employee " + empCode + " not found"}
+	return nil, employeeNotFound("employee " + empCode + " not found")
+}
+
+// employeeNotFound builds the [ErrNotFound] answer for a lookup that the
+// client resolved itself, without a 404 from the server.
+func employeeNotFound(msg string) *Error {
+	return &Error{StatusCode: http.StatusNotFound, Method: http.MethodGet, URL: employeesPath, Message: msg}
 }

@@ -1061,6 +1061,52 @@ func TestGetByCode(t *testing.T) {
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("got %v", err)
 	}
+
+	// An empty code is answered without a request: the filter builder omits
+	// empty values, so asking would list the whole personnel table.
+	before := len(f.requests)
+	_, err = c.Employees.GetByCode(t.Context(), "")
+	if !errors.Is(err, ErrNotFound) || errors.Is(err, ErrTooManyCandidates) {
+		t.Errorf("got %v", err)
+	}
+	if n := len(f.requests) - before; n != 0 {
+		t.Errorf("an empty code sent %d requests", n)
+	}
+}
+
+// TestNilParamsAreRefused covers every write entry point. A nil would
+// otherwise be marshaled as the JSON literal null and sent; a server that
+// answered 2xx to that left EmployeeService reading the params again after
+// the write, which panicked with the record already changed.
+func TestNilParamsAreRefused(t *testing.T) {
+	f, srv := newFakeServer(t, Version9, AuthToken)
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		// A lenient endpoint: accepts anything, echoes a record.
+		fmt.Fprint(w, `{"id":7,"emp_code":"7","enable_att":true}`)
+	}
+	c := newTestClient(t, srv)
+
+	calls := map[string]func() error{
+		"employees create":   func() error { _, err := c.Employees.Create(t.Context(), nil); return err },
+		"employees update":   func() error { _, err := c.Employees.Update(t.Context(), 7, nil); return err },
+		"departments create": func() error { _, err := c.Departments.Create(t.Context(), nil); return err },
+		"departments update": func() error { _, err := c.Departments.Update(t.Context(), 7, nil); return err },
+		"areas create":       func() error { _, err := c.Areas.Create(t.Context(), nil); return err },
+		"areas update":       func() error { _, err := c.Areas.Update(t.Context(), 7, nil); return err },
+		"positions create":   func() error { _, err := c.Positions.Create(t.Context(), nil); return err },
+		"positions update":   func() error { _, err := c.Positions.Update(t.Context(), 7, nil); return err },
+	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			if err := call(); !errors.Is(err, errNilParams) {
+				t.Fatalf("got %v", err)
+			}
+		})
+	}
+	// Nothing reached the network, not even a login.
+	if n := len(f.requests); n != 0 {
+		t.Errorf("a nil params sent %d requests", n)
+	}
 }
 
 func TestGetByCodeGivesUpOnTooManyCandidates(t *testing.T) {
