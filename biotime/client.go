@@ -88,6 +88,18 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 	if u.Host == "" {
 		return nil, fmt.Errorf("biotime: base URL has no host: %q", baseURL)
 	}
+	// Credentials in the base URL cannot work and cannot stay secret. There
+	// is one Authorization header and the server's token scheme owns it, so
+	// the transport would send basic auth on the login request and drop it
+	// on every authenticated one; and url.URL renders userinfo in clear
+	// text wherever the address is printed.
+	if u.User != nil {
+		return nil, errors.New("biotime: base URL must not carry credentials: " +
+			"they would be sent only on the login request, because the server's " +
+			"token scheme owns the Authorization header, and they would appear " +
+			"in errors and logs; give a proxy's credentials to a custom " +
+			"transport passed to WithHTTPClient instead")
+	}
 
 	c := &Client{
 		baseURL:   u,
@@ -337,7 +349,7 @@ func (c *Client) request(ctx context.Context, method, path string, query url.Val
 	}
 
 	if status < 200 || status >= 300 {
-		return newError(method, target.String(), status, respBody)
+		return newError(method, redactedURL(target), status, respBody)
 	}
 	if out == nil || len(bytes.TrimSpace(respBody)) == 0 {
 		return nil
@@ -347,7 +359,7 @@ func (c *Client) request(ctx context.Context, method, path string, query url.Val
 	}
 	if env, ok := out.(envelope); ok {
 		if code := env.envelopeCode(); code != 0 {
-			e := newError(method, target.String(), status, respBody)
+			e := newError(method, redactedURL(target), status, respBody)
 			e.Code = code
 			return e
 		}
@@ -415,11 +427,27 @@ func (c *Client) send(ctx context.Context, method string, target *url.URL, paylo
 	return resp.StatusCode, body, nil
 }
 
-// withoutQuery renders u without its query and fragment.
+// withoutQuery renders u without its query, fragment and userinfo: filter
+// values such as names, and any credentials that reached the address, do
+// not belong in a message.
 func withoutQuery(u *url.URL) string {
 	bare := *u
+	bare.User = nil
 	bare.RawQuery = ""
 	bare.Fragment = ""
+	return bare.String()
+}
+
+// redactedURL renders u complete, query included, but without userinfo. It
+// is what [Error.URL] carries. [New] refuses a base URL with credentials,
+// so this is a second line of defense for an address that reaches an error
+// by another route.
+func redactedURL(u *url.URL) string {
+	if u.User == nil {
+		return u.String()
+	}
+	bare := *u
+	bare.User = nil
 	return bare.String()
 }
 

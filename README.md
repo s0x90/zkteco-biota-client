@@ -141,7 +141,13 @@ client, err := biotime.New("http://biotime.example.com:8080",
 ```
 
 The base URL may carry a path prefix (`https://example.com/biotime`), which
-is prepended to every request. Only `http` and `https` are accepted.
+is prepended to every request. Only `http` and `https` are accepted, and a
+URL carrying credentials (`https://user:pass@host/`) is refused: there is
+one `Authorization` header and the server's token scheme owns it, so the
+credentials would reach the login request and nothing else, and they would
+be rendered wherever the address is printed. Credentials for a basic-auth
+proxy in front of the server belong in a custom transport passed to
+`WithHTTPClient`.
 
 ## Authentication
 

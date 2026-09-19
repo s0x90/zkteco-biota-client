@@ -139,10 +139,19 @@ func newTestClient(t *testing.T, srv *httptest.Server, opts ...Option) *Client {
 }
 
 func TestNewValidation(t *testing.T) {
-	for _, bad := range []string{"", "biotime.example.com:8080", "ftp://x", "http://"} {
+	for _, bad := range []string{
+		"", "biotime.example.com:8080", "ftp://x", "http://",
+		// Credentials in the address are refused: one Authorization header
+		// cannot carry both basic auth and the server's token, and userinfo
+		// is rendered in clear text wherever the address is printed.
+		"http://admin:hunter2@host/", "https://admin@host/", "http://@host/",
+	} {
 		if _, err := New(bad); err == nil {
 			t.Errorf("New(%q) succeeded", bad)
 		}
+	}
+	if _, err := New("http://admin:hunter2@host/"); err == nil || !strings.Contains(err.Error(), "must not carry credentials") {
+		t.Errorf("got %v", err)
 	}
 	if _, err := New("http://x", WithVersion(7)); err == nil {
 		t.Error("unsupported version accepted")
@@ -1187,6 +1196,30 @@ func TestErrorParsing(t *testing.T) {
 	}
 	if !strings.Contains(e.URL, "search=Ivanova") {
 		t.Error(e.URL)
+	}
+}
+
+func TestPrintedURLsDropUserinfo(t *testing.T) {
+	// New refuses such an address, so these guard the paths that render one
+	// should it ever arrive by another route.
+	u, err := url.Parse("http://admin:hunter2@host:8080/personnel/api/employees/?search=Ivanova")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := withoutQuery(u); got != "http://host:8080/personnel/api/employees/" {
+		t.Errorf("withoutQuery = %q", got)
+	}
+	if got := redactedURL(u); got != "http://host:8080/personnel/api/employees/?search=Ivanova" {
+		t.Errorf("redactedURL = %q", got)
+	}
+	plain, _ := url.Parse("http://host/x/?a=b")
+	if got := redactedURL(plain); got != "http://host/x/?a=b" {
+		t.Errorf("redactedURL without userinfo = %q", got)
+	}
+	// The value the transport puts in its own error is replaced with the
+	// scrubbed one, so it must not be the weaker of the two.
+	if strings.Contains(withoutQuery(u), "hunter2") || strings.Contains(redactedURL(u), "hunter2") {
+		t.Error("password survived")
 	}
 }
 
