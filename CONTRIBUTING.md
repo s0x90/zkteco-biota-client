@@ -64,7 +64,11 @@ module gains a dependency: this client is dependency-free by design.
 `make test-tz` re-runs the suite in a zone west of UTC. `NewDate` and
 `DateTime` interpret the server's naive timestamps in the configured zone, and
 a test that accidentally relies on the host zone would pass on a runner at or
-east of UTC and fail elsewhere.
+east of UTC and fail elsewhere. The target marks the run, and `TestWestOfUTCRun`
+fails if the process turns out not to be west of UTC after all, so a host
+without a zone database cannot turn that run into a second UTC one that
+reports success. The IANA database is embedded in the test binary
+(`tzdata_test.go`) so that it always is.
 
 `make build-32` compiles and vets for a 32-bit target. `FlexInt` range-checks
 decoded values against `int` rather than `int64` because this client runs on

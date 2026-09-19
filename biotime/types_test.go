@@ -560,25 +560,21 @@ func TestDaylightSavingEdges(t *testing.T) {
 	}
 }
 
-// TestHostZoneFollowsTZ makes the west-of-UTC run prove it happened. With
-// no zone database TZ resolves to UTC, and `make test-tz` would still
-// report ok having run the suite a second time in the zone it was trying
-// to get away from.
-func TestHostZoneFollowsTZ(t *testing.T) {
-	tz := os.Getenv("TZ")
-	if tz == "" {
-		return // the plain `make test` run sets none; nothing to check
+// TestWestOfUTCRun makes the west-of-UTC run prove it happened. Without a
+// zone database TZ resolves to UTC, and `make test-tz` would report ok
+// having run the suite a second time in the zone it was trying to leave.
+//
+// The marker comes from the Makefile rather than from TZ, which is not
+// parsed here: TZ may legitimately hold a POSIX form such as UTC0 or a
+// path such as :/etc/localtime, and resolving those as zone names would
+// fail `make test` for a contributor whose shell sets one, over something
+// unrelated to their change.
+func TestWestOfUTCRun(t *testing.T) {
+	if os.Getenv("BIOTIME_TEST_WEST_OF_UTC") == "" {
+		return // a plain run makes no such claim; nothing to assert
 	}
-	want, err := time.LoadLocation(tz)
-	if err != nil {
-		t.Fatalf("TZ=%s does not name a zone: %v", tz, err)
-	}
-	now := time.Now()
-	_, wantOffset := now.In(want).Zone()
-	_, gotOffset := now.In(time.Local).Zone()
-	if gotOffset != wantOffset {
-		t.Fatalf("TZ=%s asks for UTC%+d but the process runs at UTC%+d; the zone database did not take effect",
-			tz, wantOffset/3600, gotOffset/3600)
+	if _, offset := time.Now().Zone(); offset >= 0 {
+		t.Fatalf("this run is meant to be west of UTC, but the process is at UTC%+d: TZ did not take effect", offset/3600)
 	}
 }
 
