@@ -5,7 +5,7 @@ started.
 
 ## Prerequisites
 
-- Go 1.26 or higher
+- Go 1.27 or higher
 - `make`
 
 All lint and analysis tools (golangci-lint, govulncheck, deadcode) are pinned

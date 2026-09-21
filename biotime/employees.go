@@ -370,7 +370,7 @@ func (s *EmployeeService) GetByCode(ctx context.Context, empCode string) (*Emplo
 	if empCode == "" {
 		return nil, employeeNotFound("employee code is empty")
 	}
-	filter := &EmployeeFilter{EmpCode: empCode, ListOptions: ListOptions{PageSize: 100}}
+	filter := &EmployeeFilter{EmpCode: empCode, PageSize: 100}
 	seen := 0
 	for e, err := range s.All(ctx, filter) {
 		if err != nil {

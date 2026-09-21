@@ -108,7 +108,8 @@ func run(o options) error {
 
 	fmt.Println("== Employees (first page)")
 	page, err := client.Employees.List(ctx, &biotime.EmployeeFilter{
-		ListOptions: biotime.ListOptions{PageSize: 20, Ordering: "emp_code"},
+		PageSize: 20,
+		Ordering: "emp_code",
 	})
 	if err != nil {
 		return err
@@ -124,8 +125,9 @@ func run(o options) error {
 
 	fmt.Printf("== Punches since %s\n", o.since)
 	filter := &biotime.TransactionFilter{
-		StartTime:   time.Now().Add(-o.since),
-		ListOptions: biotime.ListOptions{PageSize: 100, Ordering: "punch_time,id"},
+		StartTime: time.Now().Add(-o.since),
+		PageSize:  100,
+		Ordering:  "punch_time,id",
 	}
 	var n int
 	for tx, err := range client.Transactions.All(ctx, filter) {

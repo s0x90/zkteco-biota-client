@@ -658,10 +658,10 @@ func TestPaginationLegacy(t *testing.T) {
 	c := newTestClient(t, srv, WithVersion(Version8), WithAuthScheme(AuthJWT))
 
 	page, err := c.Employees.List(t.Context(), &EmployeeFilter{
-		ListOptions: ListOptions{PageSize: 2, Ordering: "-id", Search: "harry"},
-		Department:  3,
-		AppStatus:   new(0),
-		EmpCode:     "7",
+		PageSize: 2, Ordering: "-id", Search: "harry",
+		Department: 3,
+		AppStatus:  new(0),
+		EmpCode:    "7",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -675,7 +675,7 @@ func TestPaginationLegacy(t *testing.T) {
 	}
 
 	var ids []int
-	for e, err := range c.Employees.All(t.Context(), &EmployeeFilter{ListOptions: ListOptions{PageSize: 2}}) {
+	for e, err := range c.Employees.All(t.Context(), &EmployeeFilter{PageSize: 2}) {
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -697,7 +697,7 @@ func TestPaginationLegacy(t *testing.T) {
 	}
 
 	// Starting page is honored.
-	all, err := Collect(c.Employees.All(t.Context(), &EmployeeFilter{ListOptions: ListOptions{Page: 3}}))
+	all, err := Collect(c.Employees.All(t.Context(), &EmployeeFilter{Page: 3}))
 	if err != nil || len(all) != 1 || all[0].ID != 5 {
 		t.Errorf("%v %v", all, err)
 	}
@@ -717,7 +717,7 @@ func TestPaginationModernAndEnvelopeError(t *testing.T) {
 	}
 	c := newTestClient(t, srv)
 
-	page, err := c.Terminals.List(t.Context(), &TerminalFilter{ListOptions: ListOptions{PageSize: 2}, SN: "A", Area: 9, IPAddress: "10.0.0.1", State: new(1)})
+	page, err := c.Terminals.List(t.Context(), &TerminalFilter{PageSize: 2, SN: "A", Area: 9, IPAddress: "10.0.0.1", State: new(1)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -734,7 +734,7 @@ func TestPaginationModernAndEnvelopeError(t *testing.T) {
 		t.Fatalf("%v %v", all, err)
 	}
 
-	_, err = c.Terminals.List(t.Context(), &TerminalFilter{ListOptions: ListOptions{Page: 9}})
+	_, err = c.Terminals.List(t.Context(), &TerminalFilter{Page: 9})
 	apiErr, ok := errors.AsType[*Error](err)
 	if !ok || apiErr.Code != 2 || apiErr.Message != "page out of range" || apiErr.StatusCode != http.StatusOK {
 		t.Fatalf("got %v", err)
@@ -743,7 +743,7 @@ func TestPaginationModernAndEnvelopeError(t *testing.T) {
 	// The iterator surfaces the error and stops.
 	var n int
 	var iterErr error
-	for _, err := range c.Terminals.All(t.Context(), &TerminalFilter{ListOptions: ListOptions{Page: 9}}) {
+	for _, err := range c.Terminals.All(t.Context(), &TerminalFilter{Page: 9}) {
 		n++
 		iterErr = err
 	}
@@ -787,7 +787,7 @@ func TestIterationFailsOnEmptyPageWithNextLink(t *testing.T) {
 		f.page(w, 500, "next")
 	}
 	c := newTestClient(t, srv)
-	all, err := Collect(c.Departments.All(t.Context(), &DepartmentFilter{ListOptions: ListOptions{Search: "Ivanova"}}))
+	all, err := Collect(c.Departments.All(t.Context(), &DepartmentFilter{Search: "Ivanova"}))
 	if err == nil || !strings.Contains(err.Error(), "empty page") || len(all) != 0 {
 		t.Fatal(all, err)
 	}
@@ -1151,7 +1151,7 @@ func TestTransactionsFilterAndDecoding(t *testing.T) {
 	start := time.Date(2019, 3, 1, 0, 0, 0, 0, time.UTC)
 	page, err := c.Transactions.List(t.Context(), &TransactionFilter{
 		EmpCode: "1", TerminalSN: "SN", TerminalAlias: "Gate", StartTime: start, EndTime: start.Add(24 * time.Hour),
-		ListOptions: ListOptions{Ordering: "punch_time"},
+		Ordering: "punch_time",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1364,7 +1364,7 @@ func TestPrintedURLsDropUserinfo(t *testing.T) {
 }
 
 func TestTransportErrorsOmitQuery(t *testing.T) {
-	filter := &EmployeeFilter{ListOptions: ListOptions{Search: "Ivanova"}}
+	filter := &EmployeeFilter{Search: "Ivanova"}
 
 	t.Run("timeout", func(t *testing.T) {
 		f, srv := newFakeServer(t, Version9, AuthToken)
@@ -1423,7 +1423,7 @@ func TestDebugLogOmitsQuery(t *testing.T) {
 	var logged strings.Builder
 	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	c := newTestClient(t, srv, WithLogger(logger))
-	if _, err := c.Employees.List(t.Context(), &EmployeeFilter{ListOptions: ListOptions{Search: "Ivanova"}}); err != nil {
+	if _, err := c.Employees.List(t.Context(), &EmployeeFilter{Search: "Ivanova"}); err != nil {
 		t.Fatal(err)
 	}
 	out := logged.String()
@@ -1480,7 +1480,7 @@ func TestIterationFollowsNextLink(t *testing.T) {
 		}
 	}
 	c := newTestClient(t, srv)
-	all, err := Collect(c.Terminals.All(t.Context(), &TerminalFilter{SN: "keep", ListOptions: ListOptions{PageSize: 2}}))
+	all, err := Collect(c.Terminals.All(t.Context(), &TerminalFilter{SN: "keep", PageSize: 2}))
 	if err != nil || len(all) != 3 || all[2].ID != 3 {
 		t.Fatalf("%v %v", all, err)
 	}
@@ -1500,7 +1500,7 @@ func TestIterationDetectsRepeatedPage(t *testing.T) {
 		f.page(w, 99, srv.URL+"/personnel/api/areas/?page=2", map[string]any{"id": 1})
 	}
 	c := newTestClient(t, srv)
-	all, err := Collect(c.Areas.All(t.Context(), &AreaFilter{ListOptions: ListOptions{Search: "Ivanova"}}))
+	all, err := Collect(c.Areas.All(t.Context(), &AreaFilter{Search: "Ivanova"}))
 	if err == nil || !strings.Contains(err.Error(), "repeated page 2") || strings.Contains(err.Error(), "Ivanova") {
 		t.Fatalf("expected a repeated page error naming the page and not the filter, got %v", err)
 	}
