@@ -1,0 +1,60 @@
+name: Lint
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# The installed Go must satisfy go.mod on its own. Without this, a tool bump
+# raising the go directive in internal/tools/go.mod past the version installed
+# below would silently download and build with a different toolchain than the
+# one CI reports.
+env:
+  GOTOOLCHAIN: local
+
+# Cancel superseded runs on PR branches only. On master every merge shares the
+# same ref, so cancelling would drop earlier merges' results and coverage uploads.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    # One matrix entry per tool so each shows up as its own check and they run
+    # in parallel. The tools are pinned in internal/tools/go.mod and built via
+    # the Makefile, so CI and contributors run exactly the same commands.
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: golangci-lint
+            target: lint-golangci-lint
+          - name: govulncheck
+            target: lint-govulncheck
+          - name: deadcode
+            target: lint-deadcode
+          - name: CI matrix drift
+            target: check-ci
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The Go version is read from go.mod, resolved to its latest patch
+      # release, so it lives in exactly one place.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache-dependency-path: internal/tools/go.sum
+
+      - name: ${{ matrix.name }}
+        run: make ${{ matrix.target }}

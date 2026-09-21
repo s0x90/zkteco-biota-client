@@ -1,0 +1,61 @@
+name: Test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# The installed Go must satisfy go.mod on its own; see lint.yml.
+env:
+  GOTOOLCHAIN: local
+
+# Cancel superseded runs on PR branches only. On master every merge shares the
+# same ref, so cancelling would drop earlier merges' results and coverage uploads.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The library has no dependencies and therefore no go.sum, so there is
+      # nothing for setup-go to key a module cache on; the tools module is
+      # not needed by this workflow.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+
+      - name: Build
+        run: make build
+
+      - name: Build for 32-bit
+        run: make build-32
+
+      - name: Test
+        run: make test COVERPROFILE=coverage.out
+
+      - name: Test west of UTC
+        run: make test-tz
+
+      # Tokenless uploads work for public repositories; forks and Dependabot
+      # runs have no secret and fall back to that. A failed upload is a
+      # Codecov problem, not a test failure, so it does not fail the job.
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          files: coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}
