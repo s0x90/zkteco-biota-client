@@ -73,29 +73,36 @@ func TestREADMESnippets(t *testing.T) {
 	blocks := readmeGoBlocks(t)
 
 	fset := token.NewFileSet()
-	files := make([]*ast.File, len(blocks))
-	parseErrs := make([]error, len(blocks))
+	snippets := make([]snippet, len(blocks))
 	for i, b := range blocks {
 		// The block's first line is the one after its opening fence.
 		src := fmt.Sprintf("//line README.md:%d\n%s", b.line+1, b.src)
-		if !isWholeFile(b.src) {
+		sn := snippet{fragment: !isWholeFile(b.src)}
+		if sn.fragment {
 			src = fmt.Sprintf(fragmentPrelude, src)
 		}
-		files[i], parseErrs[i] = parser.ParseFile(fset, "snippet.go", src, parser.SkipObjectResolution)
+		sn.file, sn.parseErr = parser.ParseFile(fset, "snippet.go", src, parser.SkipObjectResolution)
+		snippets[i] = sn
 	}
 
-	checker := newSnippetChecker(t, fset, goModVersion(t), files)
+	checker := newSnippetChecker(t, fset, goModVersion(t), snippets)
 	for i, b := range blocks {
 		t.Run(fmt.Sprintf("line_%d", b.line), func(t *testing.T) {
-			if err := parseErrs[i]; err != nil {
-				t.Error(err)
-				return
-			}
-			for _, err := range checker.check(files[i]) {
+			t.Parallel()
+			for _, err := range checker.check(snippets[i]) {
 				t.Error(err)
 			}
 		})
 	}
+}
+
+// snippet is one README block, parsed. A fragment was wrapped in
+// fragmentPrelude; the file may be non-nil alongside a parse error when
+// the parser recovered enough to continue.
+type snippet struct {
+	file     *ast.File
+	parseErr error
+	fragment bool
 }
 
 // isWholeFile reports whether src is a complete Go file rather than a
@@ -185,65 +192,77 @@ func goModVersion(t *testing.T) string {
 	return ""
 }
 
-// snippetChecker type-checks one snippet at a time against export data the
-// go command produced for the working tree, so the snippets are checked
-// against the code in this very commit, not against a published version.
-// Export data is what a real build uses, and reading it is fast; the
-// "source" importer would type-check the standard library from source
-// instead, which under the race detector costs over ten seconds.
+// snippetChecker type-checks snippets against export data the go command
+// produced for the working tree, so the snippets are checked against the
+// code in this very commit, not against a published version. Export data
+// is what a real build uses, and reading it is fast; the "source" importer
+// would type-check the standard library from source instead, which under
+// the race detector costs over ten seconds.
+//
+// The export map is resolved once and read-only afterwards, and each check
+// builds its own importer over it: the gc importer caches packages in a
+// plain map, so sharing one across parallel subtests would race.
 type snippetChecker struct {
-	fset     *token.FileSet
-	importer types.Importer
-	version  string
+	fset    *token.FileSet
+	exports map[string]string // import path -> export data file
+	version string
 }
 
-// newSnippetChecker resolves export data for every package the files
-// import, transitively, in a single go list invocation. A nil file (one
-// that failed to parse) contributes no imports.
-func newSnippetChecker(t *testing.T, fset *token.FileSet, goVersion string, files []*ast.File) *snippetChecker {
+// newSnippetChecker resolves export data for every package the snippets
+// import, transitively, in a single go list invocation. A snippet that
+// failed to parse contributes no imports.
+func newSnippetChecker(t *testing.T, fset *token.FileSet, goVersion string, snippets []snippet) *snippetChecker {
 	t.Helper()
-	exports := exportData(t, importPaths(files))
+	return &snippetChecker{
+		fset:    fset,
+		exports: exportData(t, importPaths(snippets)),
+		version: goVersion,
+	}
+}
+
+// check type-checks one snippet as a single-file package and returns the
+// errors a user's build would report, minus the tolerated ones. A parse
+// error is the only error reported for that snippet.
+func (c *snippetChecker) check(sn snippet) []error {
+	if sn.parseErr != nil {
+		return []error{sn.parseErr}
+	}
 	lookup := func(path string) (io.ReadCloser, error) {
-		file, ok := exports[path]
+		file, ok := c.exports[path]
 		if !ok {
 			return nil, fmt.Errorf("no export data for %q", path)
 		}
 		return os.Open(file)
 	}
-	return &snippetChecker{
-		fset:     fset,
-		importer: importer.ForCompiler(fset, "gc", lookup),
-		version:  goVersion,
-	}
-}
-
-// check type-checks one parsed snippet as a single-file package and returns
-// the errors a user's build would report, minus the tolerated ones.
-func (c *snippetChecker) check(file *ast.File) []error {
 	var errs []error
 	conf := types.Config{
 		GoVersion: c.version,
-		Importer:  c.importer,
+		Importer:  importer.ForCompiler(c.fset, "gc", lookup),
 		Error: func(err error) {
-			if typeErr, ok := errors.AsType[types.Error](err); ok && tolerated.MatchString(typeErr.Msg) {
-				return
+			if typeErr, ok := errors.AsType[types.Error](err); ok {
+				if tolerated.MatchString(typeErr.Msg) {
+					return
+				}
+				if sn.fragment && strings.HasPrefix(typeErr.Msg, "undefined: ") {
+					err = fmt.Errorf("%w (a README fragment may use client, ctx and emp and the packages fragmentPrelude imports; extend the prelude for anything else)", err)
+				}
 			}
 			errs = append(errs, err)
 		},
 	}
-	_, _ = conf.Check("snippet", c.fset, []*ast.File{file}, nil)
+	_, _ = conf.Check("snippet", c.fset, []*ast.File{sn.file}, nil)
 	return errs
 }
 
-// importPaths returns the distinct import paths of the files, sorted.
-func importPaths(files []*ast.File) []string {
+// importPaths returns the distinct import paths of the snippets, sorted.
+func importPaths(snippets []snippet) []string {
 	seen := make(map[string]bool)
 	var paths []string
-	for _, f := range files {
-		if f == nil {
+	for _, sn := range snippets {
+		if sn.file == nil {
 			continue
 		}
-		for _, imp := range f.Imports {
+		for _, imp := range sn.file.Imports {
 			path, err := strconv.Unquote(imp.Path.Value)
 			if err != nil || seen[path] {
 				continue

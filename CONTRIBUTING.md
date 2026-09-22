@@ -123,6 +123,10 @@ change.
   against the working tree, so a rename or a syntax rewrite that misses the
   README fails `make test` instead of a user's first build. Keep the
   snippets compiling; an unused result is fine, an unknown field is not.
+  A snippet that is not a whole program is wrapped in a function that
+  provides `client`, `ctx` and `emp` and imports `context`, `errors`,
+  `fmt`, `net/http`, `os` and `time`. A snippet that needs more extends
+  `fragmentPrelude` in `biotime/readme_test.go`.
 
 ## Tests
 
