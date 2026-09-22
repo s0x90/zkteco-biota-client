@@ -119,6 +119,10 @@ change.
 - Exported identifiers carry a doc comment. Behavior that differs between
   server generations is documented on the field or method it affects, with
   the generation named.
+- Every ```go block in `README.md` is type-checked by `TestREADMESnippets`
+  against the working tree, so a rename or a syntax rewrite that misses the
+  README fails `make test` instead of a user's first build. Keep the
+  snippets compiling; an unused result is fine, an unknown field is not.
 
 ## Tests
 

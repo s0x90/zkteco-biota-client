@@ -92,6 +92,10 @@ go get github.com/s0x90/zkteco-biota-client/biotime
 
 Requires Go 1.27 or newer. The module has no third-party dependencies.
 
+The library tracks the current Go release and uses its language features,
+so the previous release is not supported. Raising the minimum Go version is
+announced in the release notes and ships as a minor version, never a patch.
+
 ## Quick start
 
 ```go
