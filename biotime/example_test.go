@@ -31,8 +31,9 @@ func Example() {
 
 	ctx := context.Background()
 	filter := &biotime.TransactionFilter{
-		StartTime:   time.Now().Add(-24 * time.Hour),
-		ListOptions: biotime.ListOptions{PageSize: 200, Ordering: "punch_time,id"},
+		StartTime: time.Now().Add(-24 * time.Hour),
+		PageSize:  200,
+		Ordering:  "punch_time,id",
 	}
 	for tx, err := range client.Transactions.All(ctx, filter) {
 		if err != nil {

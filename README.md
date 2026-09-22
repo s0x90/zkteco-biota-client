@@ -44,7 +44,7 @@ for the ADMS push protocol.
 
 - **Both server generations** from one API: pick `Version8` or `Version9`,
   everything else is shared.
-- **Zero dependencies.** Pure standard library, Go 1.26+.
+- **Zero dependencies.** Pure standard library, Go 1.27+.
 - **Typed services** for employees, departments, areas, positions, terminals
   and transactions, plus an escape hatch (`Do`, `Get`, `Post`) for every
   other endpoint.
@@ -90,7 +90,11 @@ was verified on a live 8.x installation is listed under
 go get github.com/s0x90/zkteco-biota-client/biotime
 ```
 
-Requires Go 1.26 or newer. The module has no third-party dependencies.
+Requires Go 1.27 or newer. The module has no third-party dependencies.
+
+The library tracks the current Go release and uses its language features,
+so the previous release is not supported. Raising the minimum Go version is
+announced in the release notes and ships as a minor version, never a patch.
 
 ## Quick start
 
@@ -117,8 +121,9 @@ func main() {
 
 	// Stream every punch of the last 24 hours, page by page.
 	filter := &biotime.TransactionFilter{
-		StartTime:   time.Now().Add(-24 * time.Hour),
-		ListOptions: biotime.ListOptions{PageSize: 200, Ordering: "punch_time,id"},
+		StartTime: time.Now().Add(-24 * time.Hour),
+		PageSize:  200,
+		Ordering:  "punch_time,id",
 	}
 	for tx, err := range client.Transactions.All(ctx, filter) {
 		if err != nil {
@@ -215,8 +220,9 @@ returns an `iter.Seq2[T, error]`:
 
 ```go
 page, err := client.Employees.List(ctx, &biotime.EmployeeFilter{
-	Department:  3,
-	ListOptions: biotime.ListOptions{PageSize: 50, Ordering: "emp_code"},
+	Department: 3,
+	PageSize:   50,
+	Ordering:   "emp_code",
 })
 fmt.Println(page.Count, len(page.Results), page.HasNext())
 
