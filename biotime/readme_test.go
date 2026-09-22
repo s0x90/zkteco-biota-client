@@ -9,9 +9,13 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -27,7 +31,8 @@ const (
 // snippets use a client, a context and an employee they never declare, and
 // some of them `return err`, so the wrapper provides all three and returns
 // an error. The snippet goes in its own block so its `:=` declarations shadow
-// the prelude's instead of clashing with them.
+// the prelude's instead of clashing with them. The snippet itself starts
+// with a //line directive, so errors point at the README.
 const fragmentPrelude = `package main
 
 import (
@@ -43,8 +48,7 @@ import (
 
 func _(client *biotime.Client, ctx context.Context, emp *biotime.Employee) error {
 	{
-%s
-	}
+%s	}
 	return nil
 }
 `
@@ -64,15 +68,26 @@ func TestREADMESnippets(t *testing.T) {
 	if len(blocks) == 0 {
 		t.Fatalf("no ```go blocks found in %s", readmePath)
 	}
-	checker := newSnippetChecker(goModVersion(t))
 
-	for _, b := range blocks {
+	fset := token.NewFileSet()
+	files := make([]*ast.File, len(blocks))
+	for i, b := range blocks {
+		// The block's first line is the one after its opening fence.
+		src := fmt.Sprintf("//line README.md:%d\n%s", b.line+1, b.src)
+		if !strings.HasPrefix(b.src, "package ") {
+			src = fmt.Sprintf(fragmentPrelude, src)
+		}
+		f, err := parser.ParseFile(fset, "snippet.go", src, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[i] = f
+	}
+
+	checker := newSnippetChecker(t, fset, goModVersion(t), files)
+	for i, b := range blocks {
 		t.Run(fmt.Sprintf("line_%d", b.line), func(t *testing.T) {
-			src := b.src
-			if !strings.HasPrefix(src, "package ") {
-				src = fmt.Sprintf(fragmentPrelude, src)
-			}
-			for _, err := range checker.check(src) {
+			for _, err := range checker.check(files[i]) {
 				t.Error(err)
 			}
 		})
@@ -144,35 +159,40 @@ func goModVersion(t *testing.T) string {
 	return ""
 }
 
-// snippetChecker type-checks snippets one at a time. It keeps one importer
-// across snippets because the source importer type-checks the biotime
-// package from the working tree, which costs more than a second, and caches
-// the result; a fresh importer per snippet would redo that for every block.
-// The snippets are checked against the code in this very commit, not
-// against a published version.
+// snippetChecker type-checks one snippet at a time against export data the
+// go command produced for the working tree, so the snippets are checked
+// against the code in this very commit, not against a published version.
+// Export data is what a real build uses, and reading it is fast; the
+// "source" importer would type-check the standard library from source
+// instead, which under the race detector costs over ten seconds.
 type snippetChecker struct {
 	fset     *token.FileSet
 	importer types.Importer
 	version  string
 }
 
-func newSnippetChecker(goVersion string) *snippetChecker {
-	fset := token.NewFileSet()
+// newSnippetChecker resolves export data for every package the files
+// import, transitively, in a single go list invocation.
+func newSnippetChecker(t *testing.T, fset *token.FileSet, goVersion string, files []*ast.File) *snippetChecker {
+	t.Helper()
+	exports := exportData(t, importPaths(files))
+	lookup := func(path string) (io.ReadCloser, error) {
+		file, ok := exports[path]
+		if !ok {
+			return nil, fmt.Errorf("no export data for %q", path)
+		}
+		return os.Open(file)
+	}
 	return &snippetChecker{
 		fset:     fset,
-		importer: importer.ForCompiler(fset, "source", nil),
+		importer: importer.ForCompiler(fset, "gc", lookup),
 		version:  goVersion,
 	}
 }
 
-// check parses and type-checks src as a single-file package and returns the
-// errors a user's build would report, minus the tolerated ones.
-func (c *snippetChecker) check(src string) []error {
-	file, err := parser.ParseFile(c.fset, "snippet.go", src, parser.SkipObjectResolution)
-	if err != nil {
-		return []error{err}
-	}
-
+// check type-checks one parsed snippet as a single-file package and returns
+// the errors a user's build would report, minus the tolerated ones.
+func (c *snippetChecker) check(file *ast.File) []error {
 	var errs []error
 	conf := types.Config{
 		GoVersion: c.version,
@@ -187,4 +207,47 @@ func (c *snippetChecker) check(src string) []error {
 	}
 	_, _ = conf.Check("snippet", c.fset, []*ast.File{file}, nil)
 	return errs
+}
+
+// importPaths returns the distinct import paths of the files, sorted.
+func importPaths(files []*ast.File) []string {
+	seen := make(map[string]bool)
+	var paths []string
+	for _, f := range files {
+		for _, imp := range f.Imports {
+			path, err := strconv.Unquote(imp.Path.Value)
+			if err != nil || seen[path] {
+				continue
+			}
+			seen[path] = true
+			paths = append(paths, path)
+		}
+	}
+	slices.Sort(paths)
+	return paths
+}
+
+// exportData maps each of the packages and their transitive dependencies to
+// the export data file the go command built for it.
+func exportData(t *testing.T, pkgs []string) map[string]string {
+	t.Helper()
+	args := append([]string{"list", "-export", "-deps", "-f", "{{.ImportPath}}\t{{.Export}}"}, pkgs...)
+	cmd := exec.Command("go", args...)
+	cmd.Stderr = os.Stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go list -export: %v", err)
+	}
+	exports := make(map[string]string)
+	for line := range strings.Lines(string(out)) {
+		path, file, ok := strings.Cut(strings.TrimSpace(line), "\t")
+		if path == "unsafe" {
+			continue // built into the importer; it has no export data
+		}
+		if !ok || file == "" {
+			t.Fatalf("go list -export: no export data in %q", line)
+		}
+		exports[path] = file
+	}
+	return exports
 }
