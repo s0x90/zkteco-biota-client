@@ -133,7 +133,9 @@ func WithAuthScheme(s AuthScheme) Option {
 // redirects, because a followed redirect turns a POST into a GET and
 // silently decodes the wrong resource; a custom client should set
 // CheckRedirect to return [http.ErrUseLastResponse] for the same reason.
-// The timeout set with [WithTimeout] applies to a custom client as well.
+// The timeout set with [WithTimeout] applies to a custom client as well,
+// through the request context; a Timeout on the client itself is not
+// needed.
 func WithHTTPClient(hc *http.Client) Option {
 	return func(c *Client) error {
 		if hc == nil {
@@ -144,11 +146,11 @@ func WithHTTPClient(hc *http.Client) Option {
 	}
 }
 
-// WithTimeout bounds every request that arrives with a context without a
-// deadline of its own, whatever HTTP client is in use; a context that
-// carries a deadline is left alone. The default is 30 seconds. Without
-// this, a custom client with no Timeout of its own and a background
-// context would wait forever on a server that stopped answering.
+// WithTimeout bounds every single request, whatever HTTP client is in use;
+// a shorter deadline on the caller's context wins. The default is 30
+// seconds. A walk over many pages keeps its own long deadline while no one
+// page can hang longer than this, and a custom client with no Timeout of
+// its own cannot wait forever on a server that stopped answering.
 func WithTimeout(d time.Duration) Option {
 	return func(c *Client) error {
 		if d <= 0 {

@@ -545,7 +545,7 @@ of its own.
 | `WithToken(t)` | pre-issued token |
 | `WithAuthScheme(s)` | `AuthToken` (default) or `AuthJWT` |
 | `WithHTTPClient(*http.Client)` | custom transport, TLS settings, proxies; set `CheckRedirect` to return `http.ErrUseLastResponse` |
-| `WithTimeout(d)` | bound on every request whose context has no deadline (30s), whatever HTTP client is in use |
+| `WithTimeout(d)` | bound on every single request (30s), whatever HTTP client is in use; a shorter context deadline wins |
 | `WithMaxBodySize(n)` | cap on buffered response bodies and reader request bodies (32 MiB) |
 | `WithLogger(*slog.Logger)` | log every request at debug and a rejected or suspended login at warn (never logs tokens or passwords) |
 | `WithLocation(loc)` | the zone the server keeps its wall-clock times in (default `time.Local`) |

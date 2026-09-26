@@ -563,21 +563,104 @@ func TestTransientRejectionOfFreshTokenIsRetried(t *testing.T) {
 	}
 }
 
-// TestTimeoutAppliesToCustomClient: a custom http.Client without a Timeout
-// and a context without a deadline must not wait forever.
-func TestTimeoutAppliesToCustomClient(t *testing.T) {
+// TestTimeoutBoundsEveryRequest: the per-request timeout applies on the
+// default client and on a custom one without a Timeout of its own, with a
+// background context and with a long deadline alike. A walk over many
+// pages keeps its own deadline while no one page can hang longer.
+func TestTimeoutBoundsEveryRequest(t *testing.T) {
 	f, srv := newFakeServer(t, Version9, AuthToken)
 	f.handler = func(w http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done()
 	}
-	c := newTestClient(t, srv, WithToken("tok-1"), WithHTTPClient(&http.Client{}), WithTimeout(50*time.Millisecond))
-	start := time.Now()
-	_, err := c.Areas.Get(context.Background(), 1)
-	if !errors.Is(err, context.DeadlineExceeded) {
+	longDeadline, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	for name, opt := range map[string]Option{"default client": WithUserAgent("x"), "custom client": WithHTTPClient(&http.Client{})} {
+		for ctxName, ctx := range map[string]context.Context{"no deadline": context.Background(), "long deadline": longDeadline} {
+			t.Run(name+"/"+ctxName, func(t *testing.T) {
+				c := newTestClient(t, srv, WithToken("tok-1"), opt, WithTimeout(50*time.Millisecond))
+				start := time.Now()
+				_, err := c.Areas.Get(ctx, 1)
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Errorf("got %v", err)
+				}
+				if time.Since(start) > 5*time.Second {
+					t.Error("the client's timeout did not apply")
+				}
+			})
+		}
+	}
+}
+
+// TestFleetAgainstRefusingServerLogsInTwice: the property the strike
+// counter exists for, under concurrency. Eight workers against a server
+// that refuses every fresh token cost at most two logins per backoff
+// window, not one per worker or per call.
+func TestFleetAgainstRefusingServerLogsInTwice(t *testing.T) {
+	var logins atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "token-auth") {
+			logins.Add(1)
+			fmt.Fprint(w, `{"token":"t`+strconv.Itoa(int(logins.Load()))+`"}`)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, `{"detail":"Invalid token header."}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := newTestClient(t, srv)
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			for range 3 {
+				if _, err := c.Employees.Get(t.Context(), 1); !errors.Is(err, ErrUnauthorized) {
+					t.Errorf("got %v", err)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if n := logins.Load(); n > 2 {
+		t.Errorf("8 workers x 3 calls cost %d logins; want at most 2", n)
+	}
+}
+
+// TestGatewayStatusProvesNothing: a 502 from the proxy in front of a
+// server that is down does not mark the token as accepted, so a wrong
+// scheme discovered once the server is back costs no extra login.
+func TestGatewayStatusProvesNothing(t *testing.T) {
+	var logins atomic.Int32
+	var down atomic.Bool
+	down.Store(true)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "token-auth") {
+			logins.Add(1)
+			fmt.Fprint(w, `{"token":"t`+strconv.Itoa(int(logins.Load()))+`"}`)
+			return
+		}
+		if down.Load() {
+			w.WriteHeader(http.StatusBadGateway)
+			fmt.Fprint(w, "<html>502</html>")
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, `{"detail":"Invalid token header."}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := newTestClient(t, srv)
+	var apiErr *Error
+	if _, err := c.Employees.Get(t.Context(), 1); !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadGateway {
+		t.Fatalf("got %v", err)
+	}
+	// Server back, token refused: the first refusal is strike one, since
+	// the 502 proved nothing, and the second suspends.
+	down.Store(false)
+	_, _ = c.Employees.Get(t.Context(), 1)
+	_, err := c.Employees.Get(t.Context(), 1)
+	if !errors.Is(err, ErrUnauthorized) || !strings.Contains(err.Error(), "just issued") {
 		t.Errorf("got %v", err)
 	}
-	if time.Since(start) > 5*time.Second {
-		t.Error("the client's timeout did not apply")
+	if n := logins.Load(); n != 2 {
+		t.Errorf("logins %d, want 2 (initial, one more after strike one)", n)
 	}
 }
 

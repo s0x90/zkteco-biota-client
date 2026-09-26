@@ -146,8 +146,9 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 		c.pageSizeParam = c.version.pageSizeParam()
 	}
 	if c.http == nil {
+		// No Timeout here: send bounds every request through its context,
+		// which is the one mechanism and the same on every transport.
 		c.http = &http.Client{
-			Timeout: c.timeout,
 			// A followed redirect turns POST into GET and drops the body, and
 			// the response of the wrong endpoint would then be decoded without
 			// complaint. Surface the 3xx instead; request maps it to an *Error.
@@ -557,7 +558,7 @@ func (c *Client) exchange(ctx context.Context, method, path string, query url.Va
 			}
 		}
 	}
-	if auth && resp.StatusCode != http.StatusUnauthorized {
+	if auth && provesToken(resp.StatusCode) {
 		c.markAccepted(token)
 	}
 
@@ -565,6 +566,18 @@ func (c *Client) exchange(ctx context.Context, method, path string, query url.Va
 		return nil, nil, newError(method, redactedURL(target), resp.StatusCode, resp.Body)
 	}
 	return resp, target, nil
+}
+
+// provesToken reports whether a response with the given status shows that
+// the application authenticated the request. A 401 is the opposite, and a
+// gateway status is the proxy's word for a server that is down: it proves
+// nothing about the token either way.
+func provesToken(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return false
+	}
+	return true
 }
 
 // envelope is implemented by response types that carry the 9.0 code/msg
@@ -575,10 +588,10 @@ type envelope interface {
 }
 
 // send performs a single HTTP exchange and reads the whole body, up to the
-// configured size limit. The client's timeout bounds the exchange when the
-// context carries no deadline of its own, whatever transport is in use.
+// configured size limit. The client's timeout bounds the exchange whatever
+// transport is in use; a shorter deadline on the caller's context wins.
 func (c *Client) send(ctx context.Context, method string, target *url.URL, payload []byte, contentType, token string) (*Response, error) {
-	if _, ok := ctx.Deadline(); !ok && c.timeout > 0 {
+	if c.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.timeout)
 		defer cancel()
