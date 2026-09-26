@@ -569,12 +569,14 @@ func (c *Client) exchange(ctx context.Context, method, path string, query url.Va
 }
 
 // provesToken reports whether a response with the given status shows that
-// the application authenticated the request. A 401 is the opposite, and a
-// gateway status is the proxy's word for a server that is down: it proves
-// nothing about the token either way.
+// the application authenticated the request. A 401 is the opposite; a 407
+// is a forward proxy refusing the request before the server saw it, and a
+// gateway status is the proxy's word for a server that is down. None of
+// those proves anything about the token.
 func provesToken(status int) bool {
 	switch status {
-	case http.StatusUnauthorized, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+	case http.StatusUnauthorized, http.StatusProxyAuthRequired,
+		http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 		return false
 	}
 	return true

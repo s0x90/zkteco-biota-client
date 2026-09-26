@@ -574,10 +574,10 @@ func TestTimeoutBoundsEveryRequest(t *testing.T) {
 	}
 	longDeadline, cancel := context.WithTimeout(context.Background(), time.Hour)
 	defer cancel()
-	for name, opt := range map[string]Option{"default client": WithUserAgent("x"), "custom client": WithHTTPClient(&http.Client{})} {
+	for name, opts := range map[string][]Option{"default client": nil, "custom client": {WithHTTPClient(&http.Client{})}} {
 		for ctxName, ctx := range map[string]context.Context{"no deadline": context.Background(), "long deadline": longDeadline} {
 			t.Run(name+"/"+ctxName, func(t *testing.T) {
-				c := newTestClient(t, srv, WithToken("tok-1"), opt, WithTimeout(50*time.Millisecond))
+				c := newTestClient(t, srv, append(opts, WithToken("tok-1"), WithTimeout(50*time.Millisecond))...)
 				start := time.Now()
 				_, err := c.Areas.Get(ctx, 1)
 				if !errors.Is(err, context.DeadlineExceeded) {
@@ -626,7 +626,8 @@ func TestFleetAgainstRefusingServerLogsInTwice(t *testing.T) {
 
 // TestGatewayStatusProvesNothing: a 502 from the proxy in front of a
 // server that is down does not mark the token as accepted, so a wrong
-// scheme discovered once the server is back costs no extra login.
+// scheme discovered once the server is back costs no extra login. The
+// same holds for the other statuses a proxy answers on its own.
 func TestGatewayStatusProvesNothing(t *testing.T) {
 	var logins atomic.Int32
 	var down atomic.Bool
@@ -650,6 +651,16 @@ func TestGatewayStatusProvesNothing(t *testing.T) {
 	var apiErr *Error
 	if _, err := c.Employees.Get(t.Context(), 1); !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadGateway {
 		t.Fatalf("got %v", err)
+	}
+	for _, status := range []int{http.StatusProxyAuthRequired, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+		if provesToken(status) {
+			t.Errorf("%d proves a token the server never saw", status)
+		}
+	}
+	for _, status := range []int{http.StatusOK, http.StatusForbidden, http.StatusNotFound, http.StatusInternalServerError} {
+		if !provesToken(status) {
+			t.Errorf("%d comes from the application and proves the token", status)
+		}
 	}
 	// Server back, token refused: the first refusal is strike one, since
 	// the 502 proved nothing, and the second suspends.
