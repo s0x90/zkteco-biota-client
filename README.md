@@ -196,9 +196,10 @@ endpoint.
   the same one-minute suspension applies, the token is dropped, and the
   error names the scheme. Without it a fleet of workers would turn a
   config typo into a password check per request on the server. A single
-  such rejection is followed by one more login: on a server behind a
-  balancer the first request with a new token can reach a replica the
-  token has not replicated to yet.
+  such rejection is followed by one more login, so that one transient
+  refusal does not cost a minute. Each refused request in the window is
+  logged at debug level; the rejection and the start of the suspension
+  are logged once, at warn.
 - Without a token and without credentials, the first request fails with
   `ErrNoCredentials`.
 
@@ -477,7 +478,8 @@ several zones, and nothing changes underneath a walk in progress. A
 build values for a request body with `client.DateTime(t)` and
 `client.Date(t)`, which convert an instant to the server's zone first, the
 way the server would record it. `biotime.NewDate(t)` and `NewDateTime(t)`
-keep the zone of `t`.
+keep the zone of `t`. A zero `time.Time` yields a zero value through every
+constructor, which params omit, so a missing date is never sent as year 1.
 
 ### Daylight saving
 

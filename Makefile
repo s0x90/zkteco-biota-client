@@ -188,7 +188,8 @@ test:
 	go test -race -cover $(if $(COVERPROFILE),-coverprofile=$(COVERPROFILE)) ./...
 
 ## test-tz: run the suite west of UTC, so no test silently depends on the host zone
-# NewDate and DateTime interpret naive timestamps in the configured zone; a
-# runner at or east of UTC would hide a test that relies on that accident.
+# A client's zone defaults to time.Local, so a test that decodes timestamps
+# without WithLocation relies on the host zone; a runner at or east of UTC
+# would hide that accident.
 test-tz:
 	BIOTIME_TEST_WEST_OF_UTC=1 TZ=America/Los_Angeles go test -count=1 ./...

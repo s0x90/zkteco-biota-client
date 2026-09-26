@@ -605,6 +605,21 @@ func TestTimeEncodingUsesServerZone(t *testing.T) {
 	if got := NewDateTime(instant).String(); got != "2024-06-26 22:30:00" {
 		t.Errorf("NewDateTime keeps the zone of its argument: %s", got)
 	}
+	// A zero time stays zero through every constructor, in a zone where
+	// the zero instant has a calendar date of its own, so that a missing
+	// date is omitted from params rather than sent as year 1.
+	var zero time.Time
+	for name, isZero := range map[string]bool{
+		"Client.Date": c.Date(zero).IsZero(), "Client.DateTime": c.DateTime(zero).IsZero(),
+		"NewDate": NewDate(zero.In(srv)).IsZero(), "NewDateTime": NewDateTime(zero).IsZero(),
+	} {
+		if !isZero {
+			t.Errorf("%s(zero) is not zero", name)
+		}
+	}
+	if out, _ := json.Marshal(EmployeeParams{HireDate: c.Date(zero), Birthday: c.Date(zero)}); string(out) != "{}" {
+		t.Errorf("zero dates in params encode as %s, want {}", out)
+	}
 
 	// A decoded value is the wall clock labeled UTC until a service
 	// resolves it; resolved, it keeps its digits and gains the zone, so

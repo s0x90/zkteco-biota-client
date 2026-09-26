@@ -28,11 +28,13 @@ const (
 	// a password rotation. [Client.Login] is never throttled.
 	loginBackoff = time.Minute
 	// maxFreshRejections is how many login-issued tokens in a row the
-	// server may reject before a single one is accepted, before the
-	// re-login is suspended. One is tolerated: on a server behind a
-	// balancer the first request with a new token can reach a replica the
-	// token has not replicated to yet, which is a lag, not a verdict. Two
-	// in a row is the verdict.
+	// server may reject, with none accepted in between, before the
+	// re-login is suspended. One is tolerated so that a single transient
+	// refusal of a new token does not cost a minute of refusals; a server
+	// that refuses every new token, whatever the cause, is suspended on
+	// the second. This does not ride out a lag that hits every new token,
+	// such as a read replica behind the primary: the second token meets
+	// the same lag and is the second strike.
 	maxFreshRejections = 2
 )
 
@@ -176,11 +178,24 @@ func (c *Client) Location() *time.Location { return c.loc }
 
 // DateTime wraps the instant t for a request body, in the server's zone, so
 // that it encodes as the wall-clock time the server would record for it.
-func (c *Client) DateTime(t time.Time) DateTime { return NewDateTime(t.In(c.loc)) }
+// A zero t yields the zero value, which encodes as null and is omitted
+// from params.
+func (c *Client) DateTime(t time.Time) DateTime {
+	if t.IsZero() {
+		return DateTime{}
+	}
+	return NewDateTime(t.In(c.loc))
+}
 
 // Date returns the calendar date of the instant t in the server's zone,
-// which is the date the server would record for it.
-func (c *Client) Date(t time.Time) Date { return NewDate(t.In(c.loc)) }
+// which is the date the server would record for it. A zero t yields the
+// zero value, which encodes as null and is omitted from params.
+func (c *Client) Date(t time.Time) Date {
+	if t.IsZero() {
+		return Date{}
+	}
+	return NewDate(t.In(c.loc))
+}
 
 // queryConfig is what a filter needs from the client to render itself.
 func (c *Client) queryConfig() queryConfig {
@@ -248,21 +263,26 @@ func (c *Client) recentLoginFailure(ctx context.Context) error {
 	if remaining <= 0 {
 		return nil
 	}
-	c.logAt(ctx, slog.LevelWarn, "biotime: login suspended after rejection", "scheme", string(c.scheme), "retry_in", remaining)
+	// One line per refused request belongs in the trace, not in a
+	// production log: a fleet polling through a suspension would flood it.
+	// The suspension itself was logged once, at warn, when it began.
+	c.log(ctx, "biotime: login suspended after rejection", "scheme", string(c.scheme), "retry_in", remaining)
 	return fmt.Errorf("biotime: login suspended for %s after a rejection: %w", loginBackoff, loginErr)
 }
 
-// recordLoginFailure suspends the automatic login. When dropToken is the
-// token in use it is discarded too, so that requests in the window fail on
-// the suspension without a round trip to the server.
-func (c *Client) recordLoginFailure(err error, dropToken string) {
+// recordLoginFailure suspends the automatic login and says so once, at
+// warn. When dropToken is the token in use it is discarded too, so that
+// requests in the window fail on the suspension without a round trip to
+// the server.
+func (c *Client) recordLoginFailure(ctx context.Context, err error, dropToken string) {
 	c.tokenMu.Lock()
-	defer c.tokenMu.Unlock()
 	if dropToken != "" && c.token == dropToken {
 		c.token, c.unproven = "", false
 	}
 	c.loginErr = err
 	c.loginFailed = c.now()
+	c.tokenMu.Unlock()
+	c.logAt(ctx, slog.LevelWarn, "biotime: automatic login suspended", "scheme", string(c.scheme), "for", loginBackoff)
 }
 
 // Login obtains a fresh access token with the configured credentials and
@@ -287,9 +307,8 @@ func (c *Client) recordLoginFailure(err error, dropToken string) {
 // that this method issued, before accepting a single request with either:
 // that is not expiry but a token the server never honors, as with an
 // [AuthScheme] that does not match the server, and logging in again would
-// not change it. One such rejection is followed by one more login, since
-// the first request with a new token can outrun its replication on a
-// server behind a balancer.
+// not change it. A single such rejection is followed by one more login,
+// so that one transient refusal does not cost a minute.
 func (c *Client) Login(ctx context.Context) (string, error) {
 	if c.creds == nil {
 		return "", ErrNoCredentials
@@ -313,7 +332,7 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 			// message-less 403 is an edge device's block page, not a
 			// rejected password.
 			if apiErr.Message != "" || len(apiErr.Fields) > 0 {
-				c.recordLoginFailure(err, "")
+				c.recordLoginFailure(ctx, err, "")
 			}
 		}
 		return "", err
@@ -378,8 +397,8 @@ func (c *Client) refreshToken(ctx context.Context, rejected string, rejection *E
 			return c.Login(ctx)
 		}
 		err := fmt.Errorf("biotime: server rejected %d tokens in a row that it just issued, check that WithAuthScheme(%q) matches the server: %w", strikes, c.scheme, rejection)
-		c.recordLoginFailure(err, rejected)
-		c.logAt(ctx, slog.LevelWarn, "biotime: fresh token rejected again, re-login suspended", "scheme", string(c.scheme), "status", rejection.StatusCode, "rejections", strikes)
+		c.logAt(ctx, slog.LevelWarn, "biotime: fresh token rejected again", "scheme", string(c.scheme), "status", rejection.StatusCode, "rejections", strikes)
+		c.recordLoginFailure(ctx, err, rejected)
 		return "", err
 	}
 	c.log(ctx, "biotime: token rejected, re-authenticating", "scheme", string(c.scheme))

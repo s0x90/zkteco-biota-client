@@ -424,7 +424,7 @@ func TestStaticTokenAndReauth(t *testing.T) {
 		t.Errorf("expected 3 requests (401, login, 401), got %d", n)
 	}
 	// The token from that login was never accepted and is now rejected
-	// again. One such rejection is tolerated as replication lag: one more
+	// again. One such rejection is tolerated as a transient: one more
 	// login, one more retry. A second fresh token rejected in a row is the
 	// verdict: no re-login, the token is dropped, the re-login suspended,
 	// and the request after that fails without reaching the server.
@@ -500,8 +500,8 @@ func TestFreshTokenRejectedSuspendsRelogin(t *testing.T) {
 	if c.Token() != "" {
 		t.Error("a token the server refused is still in use")
 	}
-	if !strings.Contains(logged.String(), "level=WARN msg=\"biotime: fresh token rejected again") {
-		t.Errorf("not logged as a warning:\n%s", logged.String())
+	if out := logged.String(); !strings.Contains(out, "level=WARN msg=\"biotime: fresh token rejected again\"") || !strings.Contains(out, "level=WARN msg=\"biotime: automatic login suspended\"") {
+		t.Errorf("not logged as warnings:\n%s", out)
 	}
 
 	// After the backoff one more login is tried; the server has not
@@ -531,10 +531,8 @@ func TestFreshTokenRejectedSuspendsRelogin(t *testing.T) {
 	}
 }
 
-// TestTransientRejectionOfFreshTokenIsRetried: the first request with a
-// new token reaches a replica the token has not replicated to yet. That
-// is one 401 on a fresh token, and it costs one more login, not a minute
-// of refusals.
+// TestTransientRejectionOfFreshTokenIsRetried: one 401 on a fresh token
+// costs one more login, not a minute of refusals.
 func TestTransientRejectionOfFreshTokenIsRetried(t *testing.T) {
 	f, srv := newFakeServer(t, Version9, AuthToken)
 	f.handler = func(w http.ResponseWriter, r *http.Request) { f.page(w, 0, "") }
@@ -611,10 +609,12 @@ func (f *fakeServer) loginRequests() int {
 func TestRejectedLoginIsNotRetriedPerRequest(t *testing.T) {
 	f, srv := newFakeServer(t, Version9, AuthToken)
 	f.handler = func(w http.ResponseWriter, r *http.Request) { f.page(w, 0, "") }
-	// The handler drops debug lines: a rejected login and the suspension
-	// are the events an operator must see, and they go out as warnings.
+	// The rejection and the start of the suspension are the events an
+	// operator must see, and go out as warnings; each refused request in
+	// the window is a debug line, or a fleet polling through the minute
+	// would flood the production log.
 	var logged strings.Builder
-	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	c := newTestClient(t, srv, WithCredentials("admin", "wrong"), WithLogger(logger))
 	now := time.Now()
 	c.now = func() time.Time { return now }
@@ -635,8 +635,12 @@ func TestRejectedLoginIsNotRetriedPerRequest(t *testing.T) {
 	}
 	// The refusals are visible in the trace and the error says so while
 	// still matching the rejection's sentinels.
-	if out := logged.String(); !strings.Contains(out, "level=WARN msg=\"biotime: login rejected\"") || !strings.Contains(out, "level=WARN msg=\"biotime: login suspended") {
-		t.Errorf("rejection and suspension are not logged as warnings:\n%s", out)
+	out := logged.String()
+	if !strings.Contains(out, "level=WARN msg=\"biotime: login rejected\"") || strings.Count(out, "level=WARN msg=\"biotime: automatic login suspended\"") != 1 {
+		t.Errorf("rejection and suspension are not logged once each as warnings:\n%s", out)
+	}
+	if !strings.Contains(out, "level=DEBUG msg=\"biotime: login suspended after rejection\"") || strings.Contains(out, "level=WARN msg=\"biotime: login suspended after rejection\"") {
+		t.Errorf("refused requests must be debug lines, not warnings:\n%s", out)
 	}
 	if _, err := c.Positions.List(t.Context(), nil); err == nil || !strings.Contains(err.Error(), "suspended") || !errors.Is(err, ErrValidation) {
 		t.Errorf("got %v", err)

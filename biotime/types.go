@@ -76,8 +76,13 @@ type DateTime struct {
 	naive bool
 }
 
-// NewDateTime wraps t.
-func NewDateTime(t time.Time) DateTime { return DateTime{Time: t} }
+// NewDateTime wraps t. A zero t yields the zero value.
+func NewDateTime(t time.Time) DateTime {
+	if t.IsZero() {
+		return DateTime{}
+	}
+	return DateTime{Time: t}
+}
 
 // String formats the value with [DateTimeLayout] in its own zone.
 func (d DateTime) String() string {
@@ -135,8 +140,14 @@ type Date struct {
 }
 
 // NewDate returns the calendar date of t in the zone t carries. Convert t
-// to the server's zone first, or use [Client.Date], which does.
+// to the server's zone first, or use [Client.Date], which does. A zero t
+// yields the zero value: the calendar date of the zero instant in any
+// other zone is a real date in year 1, which is not what a missing date
+// means.
 func NewDate(t time.Time) Date {
+	if t.IsZero() {
+		return Date{}
+	}
 	y, m, d := t.Date()
 	return Date{Time: time.Date(y, m, d, 0, 0, 0, 0, t.Location())}
 }
