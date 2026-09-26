@@ -20,16 +20,32 @@ const (
 	DateLayout     = "2006-01-02"
 )
 
+// timeLayout is a layout the server has been seen to use, and whether it
+// carries a zone. A layout without one yields a naive wall clock that the
+// client resolves in the server's zone; one with a zone names an instant.
+type timeLayout struct {
+	layout string
+	zoned  bool
+}
+
 // dateTimeLayouts lists the timestamp formats observed across server
 // generations, most common first.
-var dateTimeLayouts = []string{
-	DateTimeLayout,
-	"2006-01-02T15:04:05",
-	"2006-01-02 15:04:05.999999",
-	"2006-01-02T15:04:05.999999",
-	time.RFC3339Nano,
-	time.RFC3339,
-	DateLayout,
+var dateTimeLayouts = []timeLayout{
+	{DateTimeLayout, false},
+	{"2006-01-02T15:04:05", false},
+	{"2006-01-02 15:04:05.999999", false},
+	{"2006-01-02T15:04:05.999999", false},
+	{time.RFC3339Nano, true},
+	{time.RFC3339, true},
+	{DateLayout, false},
+}
+
+// dateLayouts lists the formats a date member has been seen in.
+var dateLayouts = []timeLayout{
+	{DateLayout, false},
+	{DateTimeLayout, false},
+	{"2006-01-02T15:04:05", false},
+	{time.RFC3339, true},
 }
 
 // localizable is implemented by the types that carry the server's naive
@@ -50,6 +66,9 @@ type localizable interface {
 // cannot know the client's, so it reads such a value as the wall clock
 // labeled UTC and the service resolves it in the client's zone afterwards.
 // A value decoded outside the services keeps the UTC label.
+//
+// The struct carries decoding state besides the time, so compare values
+// with [time.Time.Equal]; == and reflect.DeepEqual are not meaningful.
 type DateTime struct {
 	time.Time
 	// naive marks a decoded wall clock that has not been resolved in the
@@ -108,7 +127,8 @@ func (d *DateTime) localize(loc *time.Location) {
 // Values decoded by the services carry the server's zone; build values for
 // a request body with [Client.Date], which takes the calendar date of an
 // instant in that zone. A JSON null or empty string decodes to the zero
-// value, and the zero value encodes as null.
+// value, and the zero value encodes as null. Compare values with
+// [time.Time.Equal], as with [DateTime].
 type Date struct {
 	time.Time
 	naive bool
@@ -147,7 +167,7 @@ func (d *Date) UnmarshalJSON(b []byte) error {
 		*d = Date{}
 		return nil
 	}
-	t, naive, err := parseTime(s, []string{DateLayout, DateTimeLayout, "2006-01-02T15:04:05", time.RFC3339})
+	t, naive, err := parseTime(s, dateLayouts)
 	if err != nil {
 		return err
 	}
@@ -167,20 +187,15 @@ func (d *Date) localize(loc *time.Location) {
 // parseTime parses a timestamp. A layout without a zone yields the wall
 // clock labeled UTC and naive true; the caller resolves it in the server's
 // zone with resolve. A layout with a zone yields the instant it names.
-func parseTime(s string, layouts []string) (t time.Time, naive bool, err error) {
-	for _, layout := range layouts {
-		t, err := time.ParseInLocation(layout, s, time.UTC)
+func parseTime(s string, layouts []timeLayout) (t time.Time, naive bool, err error) {
+	for _, l := range layouts {
+		t, err := time.ParseInLocation(l.layout, s, time.UTC)
 		if err != nil {
 			continue
 		}
-		return t, !layoutHasZone(layout), nil
+		return t, !l.zoned, nil
 	}
 	return time.Time{}, false, fmt.Errorf("biotime: cannot parse time %q", s)
-}
-
-// layoutHasZone reports whether a layout carries a zone designator.
-func layoutHasZone(layout string) bool {
-	return strings.Contains(layout, "Z07") || strings.Contains(layout, "-07") || strings.Contains(layout, "MST")
 }
 
 // resolve places a decoded time in loc: a naive wall clock keeps its digits

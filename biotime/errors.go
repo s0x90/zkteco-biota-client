@@ -30,6 +30,11 @@ var (
 	// ErrNoCredentials is returned when a request needs a token but neither
 	// [WithToken] nor [WithCredentials] were configured.
 	ErrNoCredentials = errors.New("biotime: no token or credentials configured")
+	// ErrWriteUnconfirmed is matched when the server accepted a create or
+	// an update with 2xx but answered with no record to return: no
+	// identifier, or a 9.0 envelope without data. The write may well have
+	// happened; read the record back before repeating it.
+	ErrWriteUnconfirmed = errors.New("biotime: write accepted, no record returned")
 	// ErrUnsupportedField is matched by an [*UnsupportedFieldError] with a
 	// definitive verdict: the server accepted a write with 2xx but the
 	// record shows that a field of the request was not applied, which

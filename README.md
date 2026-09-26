@@ -189,13 +189,16 @@ endpoint.
   `400` that carries Django REST framework's JSON message or field errors.
   An edge device's HTML block page is refused like any other request but
   suspends nothing.
-- A token the client just obtained that the server rejects before accepting
-  a single request with it is not expiry: the server never honored the
-  token, which is what a wrong `WithAuthScheme` or a revoked account looks
-  like. Logging in again would not change that, so the same one-minute
-  suspension applies, the token is dropped, and the error names the scheme.
-  Without it a fleet of workers would turn a config typo into a password
-  check per request on the server.
+- Two tokens in a row that the client just obtained and the server rejects
+  before accepting a single request with either is not expiry: the server
+  never honors the token, which is what a wrong `WithAuthScheme` or a
+  revoked account looks like. Logging in again would not change that, so
+  the same one-minute suspension applies, the token is dropped, and the
+  error names the scheme. Without it a fleet of workers would turn a
+  config typo into a password check per request on the server. A single
+  such rejection is followed by one more login: on a server behind a
+  balancer the first request with a new token can reach a replica the
+  token has not replicated to yet.
 - Without a token and without credentials, the first request fails with
   `ErrNoCredentials`.
 
@@ -317,7 +320,10 @@ requires `FirstName`. `Get`, `Create` and `Update` decode a single record
 with the same discipline as a page: a 9.0 `{code,msg,data}` envelope is
 unwrapped and a non-zero code is an `*Error`, and a body without an `id`,
 such as a proxy's JSON page or a misrouted request, is an error rather than
-record 0. Identifiers are positive; `Get(0)` is refused without a request. Custom attributes that the administrator added in the
+record 0. On a `Create` or `Update` that error matches `ErrWriteUnconfirmed`:
+the server said 2xx, so the write may well have happened, and the record
+should be read back rather than written again. Identifiers are positive;
+`Get(0)` is refused without a request. Custom attributes that the administrator added in the
 server UI come back in `Employee.Extra` as raw JSON and are written through
 `EmployeeParams.Extra`. A key set both on the struct and in `Extra` is an
 encoding error rather than a silent choice between the two.
@@ -433,6 +439,7 @@ case errors.Is(err, biotime.ErrValidation):
 | `ErrTooManyCandidates` | `GetByCode` gave up scanning a prefix-matching server |
 | `ErrUnsupportedField` | a write was accepted but a field was ignored (see above) |
 | `ErrUnverified` | a write was accepted but could not be read back |
+| `ErrWriteUnconfirmed` | a write was accepted but the response carried no record; read it back before repeating |
 
 Redirects are not followed and surface as a `3xx` error, because a followed
 redirect would turn a `POST` into a `GET` and silently decode the wrong

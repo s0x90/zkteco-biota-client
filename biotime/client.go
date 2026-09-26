@@ -27,6 +27,13 @@ const (
 	// password, which is how an integration account gets locked out during
 	// a password rotation. [Client.Login] is never throttled.
 	loginBackoff = time.Minute
+	// maxFreshRejections is how many login-issued tokens in a row the
+	// server may reject before a single one is accepted, before the
+	// re-login is suspended. One is tolerated: on a server behind a
+	// balancer the first request with a new token can reach a replica the
+	// token has not replicated to yet, which is a lag, not a verdict. Two
+	// in a row is the verdict.
+	maxFreshRejections = 2
 )
 
 // Client talks to a ZKBio Time server. Create one with [New]. A Client is
@@ -59,9 +66,12 @@ type Client struct {
 	// which is what a wrong [AuthScheme] or a revoked account looks like.
 	// Logging in again cannot help, and doing it once per request would
 	// turn every call into a password check on the server.
-	unproven    bool
-	loginErr    error     // the rejection, nil after a success or SetToken
-	loginFailed time.Time // when loginErr was recorded
+	unproven bool
+	// freshRejections counts consecutive login-issued tokens the server
+	// rejected before accepting a request with any; markAccepted resets it.
+	freshRejections int
+	loginErr        error     // the rejection, nil after a success or SetToken
+	loginFailed     time.Time // when loginErr was recorded
 	// loginMu serializes automatic logins so that concurrent requests
 	// share one.
 	loginMu sync.Mutex
@@ -191,12 +201,16 @@ func (c *Client) SetToken(token string) {
 }
 
 // storeToken installs a token and lifts any suspension. unproven marks a
-// token that Login obtained and the server has not accepted yet.
+// token that Login obtained and the server has not accepted yet; a token
+// the caller supplies also clears the count of rejected fresh ones.
 func (c *Client) storeToken(token string, unproven bool) {
 	c.tokenMu.Lock()
 	defer c.tokenMu.Unlock()
 	c.token = token
 	c.unproven = unproven
+	if !unproven {
+		c.freshRejections = 0
+	}
 	c.loginErr = nil
 }
 
@@ -204,7 +218,7 @@ func (c *Client) storeToken(token string, unproven bool) {
 // The write happens once per token; the common case is a read.
 func (c *Client) markAccepted(token string) {
 	c.tokenMu.RLock()
-	stale := c.unproven && c.token == token
+	stale := (c.unproven || c.freshRejections > 0) && c.token == token
 	c.tokenMu.RUnlock()
 	if !stale {
 		return
@@ -212,6 +226,7 @@ func (c *Client) markAccepted(token string) {
 	c.tokenMu.Lock()
 	if c.token == token {
 		c.unproven = false
+		c.freshRejections = 0
 	}
 	c.tokenMu.Unlock()
 }
@@ -237,9 +252,15 @@ func (c *Client) recentLoginFailure(ctx context.Context) error {
 	return fmt.Errorf("biotime: login suspended for %s after a rejection: %w", loginBackoff, loginErr)
 }
 
-func (c *Client) recordLoginFailure(err error) {
+// recordLoginFailure suspends the automatic login. When dropToken is the
+// token in use it is discarded too, so that requests in the window fail on
+// the suspension without a round trip to the server.
+func (c *Client) recordLoginFailure(err error, dropToken string) {
 	c.tokenMu.Lock()
 	defer c.tokenMu.Unlock()
+	if dropToken != "" && c.token == dropToken {
+		c.token, c.unproven = "", false
+	}
 	c.loginErr = err
 	c.loginFailed = c.now()
 }
@@ -262,10 +283,13 @@ func (c *Client) recordLoginFailure(err error) {
 // Login itself is never suspended, and [Client.SetToken] lifts the
 // suspension.
 //
-// The same suspension applies when the server rejects a token this method
-// just issued before accepting a single request with it: that is not
-// expiry but a token the server never honored, as with an [AuthScheme] that
-// does not match the server, and logging in again would not change it.
+// The same suspension applies when the server rejects two tokens in a row
+// that this method issued, before accepting a single request with either:
+// that is not expiry but a token the server never honors, as with an
+// [AuthScheme] that does not match the server, and logging in again would
+// not change it. One such rejection is followed by one more login, since
+// the first request with a new token can outrun its replication on a
+// server behind a balancer.
 func (c *Client) Login(ctx context.Context) (string, error) {
 	if c.creds == nil {
 		return "", ErrNoCredentials
@@ -289,7 +313,7 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 			// message-less 403 is an edge device's block page, not a
 			// rejected password.
 			if apiErr.Message != "" || len(apiErr.Fields) > 0 {
-				c.recordLoginFailure(err)
+				c.recordLoginFailure(err, "")
 			}
 		}
 		return "", err
@@ -345,16 +369,17 @@ func (c *Client) refreshToken(ctx context.Context, rejected string, rejection *E
 		return "", err
 	}
 	if t == rejected && unproven {
-		err := fmt.Errorf("biotime: server rejected the token it just issued, check that WithAuthScheme(%q) matches the server: %w", c.scheme, rejection)
-		// The token is known bad: drop it, so that requests in the window
-		// fail on the suspension without a round trip to the server.
 		c.tokenMu.Lock()
-		if c.token == rejected {
-			c.token, c.unproven = "", false
-		}
-		c.loginErr, c.loginFailed = err, c.now()
+		c.freshRejections++
+		strikes := c.freshRejections
 		c.tokenMu.Unlock()
-		c.logAt(ctx, slog.LevelWarn, "biotime: fresh token rejected, re-login suspended", "scheme", string(c.scheme), "status", rejection.StatusCode)
+		if strikes < maxFreshRejections {
+			c.log(ctx, "biotime: fresh token rejected, re-authenticating once more", "scheme", string(c.scheme), "status", rejection.StatusCode)
+			return c.Login(ctx)
+		}
+		err := fmt.Errorf("biotime: server rejected %d tokens in a row that it just issued, check that WithAuthScheme(%q) matches the server: %w", strikes, c.scheme, rejection)
+		c.recordLoginFailure(err, rejected)
+		c.logAt(ctx, slog.LevelWarn, "biotime: fresh token rejected again, re-login suspended", "scheme", string(c.scheme), "status", rejection.StatusCode, "rejections", strikes)
 		return "", err
 	}
 	c.log(ctx, "biotime: token rejected, re-authenticating", "scheme", string(c.scheme))

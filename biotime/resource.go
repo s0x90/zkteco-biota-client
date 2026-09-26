@@ -32,6 +32,9 @@ type record interface {
 	recordID() int
 }
 
+// errNotARecord is returned by detail for a 2xx body that holds no record.
+var errNotARecord = errors.New("biotime: response is not a record")
+
 // detail decodes a single-object response the way [Page] decodes a list:
 // the 9.0 {code,msg,data} envelope is unwrapped and a non-zero code is
 // surfaced, and a body that decodes to a record without an identifier is
@@ -66,14 +69,14 @@ func (d *detail[T]) UnmarshalJSON(b []byte) error {
 		}
 		b = bytes.TrimSpace(env.Data)
 		if len(b) == 0 || bytes.Equal(b, []byte("null")) {
-			return errors.New("biotime: response envelope carries no data member")
+			return fmt.Errorf("%w: the envelope carries no data", errNotARecord)
 		}
 	}
 	if err := json.Unmarshal(b, d.V); err != nil {
 		return err
 	}
 	if r, ok := any(d.V).(record); ok && r.recordID() == 0 {
-		return errors.New("biotime: response is not a record: it carries no id")
+		return fmt.Errorf("%w: it carries no id", errNotARecord)
 	}
 	return nil
 }
@@ -126,6 +129,12 @@ func (r *collection[T, F]) one(ctx context.Context, method string, id int, body 
 	}
 	var v T
 	if err := r.c.Do(ctx, method, path, nil, body, &detail[T]{V: &v}); err != nil {
+		// On a write, a 2xx without a record is not a decoding problem of
+		// the caller's: the server may have done what was asked and said
+		// nothing useful about it. Name that state so it can be matched.
+		if method != http.MethodGet && errors.Is(err, errNotARecord) {
+			return nil, fmt.Errorf("%w: %w", ErrWriteUnconfirmed, err)
+		}
 		return nil, err
 	}
 	return &v, nil

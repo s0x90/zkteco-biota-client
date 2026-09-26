@@ -424,13 +424,22 @@ func TestStaticTokenAndReauth(t *testing.T) {
 		t.Errorf("expected 3 requests (401, login, 401), got %d", n)
 	}
 	// The token from that login was never accepted and is now rejected
-	// again: that is not expiry, so there is no re-login and no retry. The
-	// token is dropped and the re-login suspended, so the request after
-	// that fails without reaching the server.
+	// again. One such rejection is tolerated as replication lag: one more
+	// login, one more retry. A second fresh token rejected in a row is the
+	// verdict: no re-login, the token is dropped, the re-login suspended,
+	// and the request after that fails without reaching the server.
+	before = len(f.requests)
+	_, err = c.Areas.List(t.Context(), nil)
+	if !errors.Is(err, ErrUnauthorized) || strings.Contains(err.Error(), "just issued") {
+		t.Fatalf("first fresh rejection: got %v", err)
+	}
+	if n := len(f.requests) - before; n != 3 {
+		t.Errorf("expected 3 requests (401, login, 401), got %d", n)
+	}
 	before = len(f.requests)
 	_, err = c.Areas.List(t.Context(), nil)
 	if !errors.Is(err, ErrUnauthorized) || !strings.Contains(err.Error(), "just issued") {
-		t.Fatalf("got %v", err)
+		t.Fatalf("second fresh rejection: got %v", err)
 	}
 	if n := len(f.requests) - before; n != 1 {
 		t.Errorf("expected 1 request (401), got %d", n)
@@ -449,7 +458,8 @@ func TestStaticTokenAndReauth(t *testing.T) {
 // token and then refuses every request carrying it, which is what a wrong
 // AuthScheme looks like. Without the suspension every call would cost a
 // login, and a fleet of workers would turn a config typo into a password
-// check per request on the server.
+// check per request on the server. The first rejection is tolerated (see
+// TestTransientRejectionOfFreshTokenIsRetried); the second is the verdict.
 func TestFreshTokenRejectedSuspendsRelogin(t *testing.T) {
 	var logins, calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -478,26 +488,29 @@ func TestFreshTokenRejectedSuspendsRelogin(t *testing.T) {
 		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized {
 			t.Errorf("call %d: the server's 401 is not reachable: %v", i, err)
 		}
-		if !strings.Contains(err.Error(), `WithAuthScheme("Token")`) {
+		if i > 0 && !strings.Contains(err.Error(), `WithAuthScheme("Token")`) {
 			t.Errorf("call %d: the error does not name the likely cause: %v", i, err)
 		}
 	}
-	if logins.Load() != 1 || calls.Load() != 1 {
-		t.Errorf("5 calls cost %d logins and %d requests; want one of each, then suspension", logins.Load(), calls.Load())
+	// Call 1: login, 401, login, 401. Call 2: 401, suspension. Calls 3
+	// to 5: refused without a request.
+	if logins.Load() != 2 || calls.Load() != 3 {
+		t.Errorf("5 calls cost %d logins and %d requests; want 2 and 3, then suspension", logins.Load(), calls.Load())
 	}
 	if c.Token() != "" {
 		t.Error("a token the server refused is still in use")
 	}
-	if !strings.Contains(logged.String(), "level=WARN msg=\"biotime: fresh token rejected") {
+	if !strings.Contains(logged.String(), "level=WARN msg=\"biotime: fresh token rejected again") {
 		t.Errorf("not logged as a warning:\n%s", logged.String())
 	}
 
-	// After the backoff one more login is tried, then suspension again.
+	// After the backoff one more login is tried; the server has not
+	// accepted a token since, so the next rejection suspends at once.
 	now = now.Add(loginBackoff)
 	if _, err := c.Employees.Get(t.Context(), 1); !errors.Is(err, ErrUnauthorized) {
 		t.Fatal(err)
 	}
-	if logins.Load() != 2 || calls.Load() != 2 {
+	if logins.Load() != 3 || calls.Load() != 4 {
 		t.Errorf("after the backoff: %d logins and %d requests", logins.Load(), calls.Load())
 	}
 
@@ -515,6 +528,40 @@ func TestFreshTokenRejectedSuspendsRelogin(t *testing.T) {
 	}
 	if f.logins != 2 {
 		t.Errorf("logins %d, want a re-login after the accepted token was rejected", f.logins)
+	}
+}
+
+// TestTransientRejectionOfFreshTokenIsRetried: the first request with a
+// new token reaches a replica the token has not replicated to yet. That
+// is one 401 on a fresh token, and it costs one more login, not a minute
+// of refusals.
+func TestTransientRejectionOfFreshTokenIsRetried(t *testing.T) {
+	f, srv := newFakeServer(t, Version9, AuthToken)
+	f.handler = func(w http.ResponseWriter, r *http.Request) { f.page(w, 0, "") }
+	c := newTestClient(t, srv)
+	f.reject.Store(1)
+	if _, err := c.Areas.List(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if f.logins != 2 || len(f.requests) != 4 {
+		t.Errorf("logins %d requests %d; want login, 401, login, 200", f.logins, len(f.requests))
+	}
+	// The accepted token reset the count: the next fresh rejection is the
+	// first of a new sequence, not the second of the old one.
+	f.mu.Lock()
+	f.token = "rotated"
+	f.mu.Unlock()
+	f.reject.Store(2) // the rotated token's first request, then the re-login's first
+	before := len(f.requests)
+	_, err := c.Areas.List(t.Context(), nil)
+	if !errors.Is(err, ErrUnauthorized) || strings.Contains(err.Error(), "suspended") {
+		t.Fatalf("got %v", err)
+	}
+	if n := len(f.requests) - before; n != 3 {
+		t.Errorf("expected 3 requests (401, login, 401), got %d", n)
+	}
+	if c.Token() == "" {
+		t.Error("one fresh rejection must not drop the token")
 	}
 }
 
@@ -1788,16 +1835,19 @@ func TestDetailResponseIsARecord(t *testing.T) {
 	if _, err := c.Employees.Get(ctx, 42); !errors.As(err, &apiErr) || apiErr.Code != 1 || apiErr.Message != "employee does not exist" {
 		t.Errorf("failure envelope: %v", err)
 	}
-	// An envelope without data has nothing to decode.
-	body.Store(`{"code":0,"msg":"ok","data":null}`)
-	if _, err := c.Employees.Get(ctx, 42); err == nil || !strings.Contains(err.Error(), "no data") {
-		t.Errorf("empty envelope: %v", err)
-	}
-	// A body without an id is not a record, whatever shape it has.
-	for _, b := range []string{`{"emp_code":"E1"}`, `{"detail":"maintenance"}`, `{"code":0,"msg":"ok","data":{"emp_code":"E1"}}`} {
+	// A body without an id is not a record, whatever shape it has. On a
+	// read that is a bad answer; on a write the server said 2xx, so the
+	// error says the write may have happened and matches its sentinel.
+	for _, b := range []string{`{"emp_code":"E1"}`, `{"detail":"maintenance"}`, `{"code":0,"msg":"ok","data":{"emp_code":"E1"}}`, `{"code":0,"msg":"ok","data":null}`} {
 		body.Store(b)
-		if e, err := c.Employees.Get(ctx, 42); e != nil || err == nil || !strings.Contains(err.Error(), "no id") {
-			t.Errorf("%s: %+v %v", b, e, err)
+		if e, err := c.Employees.Get(ctx, 42); e != nil || err == nil || !errors.Is(err, errNotARecord) || errors.Is(err, ErrWriteUnconfirmed) {
+			t.Errorf("Get %s: %+v %v", b, e, err)
+		}
+		if e, err := c.Employees.Create(ctx, &EmployeeParams{EmpCode: new("E1")}); e != nil || !errors.Is(err, ErrWriteUnconfirmed) {
+			t.Errorf("Create %s: %+v %v", b, e, err)
+		}
+		if e, err := c.Employees.Update(ctx, 42, &EmployeeParams{CardNo: new("1")}); e != nil || !errors.Is(err, ErrWriteUnconfirmed) || !strings.HasPrefix(err.Error(), ErrWriteUnconfirmed.Error()) {
+			t.Errorf("Update %s: %+v %v", b, e, err)
 		}
 	}
 	// A record with a custom attribute named "code" is a record: the
