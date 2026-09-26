@@ -18,6 +18,8 @@ type Position struct {
 	ParentPositionName string        `json:"parent_position_name,omitzero"`
 }
 
+func (p *Position) recordID() int { return p.ID }
+
 // PositionFilter selects positions in [PositionService.List].
 type PositionFilter struct {
 	ListOptions
@@ -29,11 +31,11 @@ type PositionFilter struct {
 	Params map[string]string
 }
 
-func (f *PositionFilter) values(pageSizeParam string) url.Values {
+func (f *PositionFilter) values(cfg queryConfig) url.Values {
 	if f == nil {
 		return url.Values{}
 	}
-	return buildQuery(f.ListOptions, f.Params, pageSizeParam, func(q query) {
+	return buildQuery(f.ListOptions, f.Params, cfg, func(q query) {
 		q.str("position_code", f.PositionCode)
 		q.str("position_name", f.PositionName)
 		q.int("parent_position", f.ParentPosition)

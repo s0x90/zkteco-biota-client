@@ -52,6 +52,11 @@ func run(o options) error {
 		return errors.New("BIOTIME_URL is not set")
 	}
 
+	opts := []biotime.Option{
+		biotime.WithVersion(biotime.Version(o.version)),
+		biotime.WithCredentials(os.Getenv("BIOTIME_USER"), os.Getenv("BIOTIME_PASS")),
+		biotime.WithTimeout(15 * time.Second),
+	}
 	// The server stores wall-clock times with no zone, so the client has to
 	// be told which one. Getting it wrong shifts the window requested below
 	// and every timestamp printed, without any error.
@@ -60,19 +65,7 @@ func run(o options) error {
 		if err != nil {
 			return fmt.Errorf("bad -tz: %w", err)
 		}
-		biotime.SetLocation(loc)
-	}
-	// time.Local prints as the word "Local", which names the mechanism and
-	// not the zone, so report the offset actually in force: that is the
-	// number to compare against the server's.
-	now := time.Now().In(biotime.Location())
-	fmt.Printf("reading the server's timestamps as %s (UTC%s right now)\n",
-		biotime.Location(), now.Format("-07:00"))
-
-	opts := []biotime.Option{
-		biotime.WithVersion(biotime.Version(o.version)),
-		biotime.WithCredentials(os.Getenv("BIOTIME_USER"), os.Getenv("BIOTIME_PASS")),
-		biotime.WithTimeout(15 * time.Second),
+		opts = append(opts, biotime.WithLocation(loc))
 	}
 	if o.jwt {
 		opts = append(opts, biotime.WithAuthScheme(biotime.AuthJWT))
@@ -85,6 +78,12 @@ func run(o options) error {
 	if err != nil {
 		return err
 	}
+	// time.Local prints as the word "Local", which names the mechanism and
+	// not the zone, so report the offset actually in force: that is the
+	// number to compare against the server's.
+	now := time.Now().In(client.Location())
+	fmt.Printf("reading the server's timestamps as %s (UTC%s right now)\n",
+		client.Location(), now.Format("-07:00"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

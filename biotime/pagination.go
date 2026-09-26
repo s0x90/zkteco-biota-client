@@ -156,6 +156,15 @@ func jsonKind(b []byte) string {
 
 func (p *Page[T]) envelopeCode() int { return p.Code }
 
+// localize resolves the timestamps of every object on the page.
+func (p *Page[T]) localize(loc *time.Location) {
+	for i := range p.Results {
+		if l, ok := any(&p.Results[i]).(localizable); ok {
+			l.localize(loc)
+		}
+	}
+}
+
 // listPage fetches a single page from a collection endpoint.
 func listPage[T any](ctx context.Context, c *Client, path string, q url.Values) (*Page[T], error) {
 	var page Page[T]
@@ -284,12 +293,20 @@ func Collect[T any](seq iter.Seq2[T, error]) ([]T, error) {
 	return out, nil
 }
 
+// queryConfig is what a filter needs from the client to render itself: the
+// name of the page size parameter and the zone to format times in.
+type queryConfig struct {
+	pageSizeParam string
+	loc           *time.Location
+}
+
 // query is a small builder for filter parameters that skips zero values.
 type query struct {
 	url.Values
+	loc *time.Location
 }
 
-func newQuery() query { return query{Values: url.Values{}} }
+func newQuery(loc *time.Location) query { return query{Values: url.Values{}, loc: loc} }
 
 func (q query) str(key, val string) {
 	if val != "" {
@@ -311,16 +328,16 @@ func (q query) intPtr(key string, val *int) {
 
 func (q query) time(key string, val time.Time) {
 	if !val.IsZero() {
-		q.Set(key, val.In(Location()).Format(DateTimeLayout))
+		q.Set(key, val.In(q.loc).Format(DateTimeLayout))
 	}
 }
 
 // buildQuery assembles the query of a list call: paging and ordering from o,
 // resource specific filters from fill, and raw params last so that callers
 // can override anything.
-func buildQuery(o ListOptions, params map[string]string, pageSizeParam string, fill func(q query)) url.Values {
-	q := newQuery()
-	o.apply(q.Values, pageSizeParam)
+func buildQuery(o ListOptions, params map[string]string, cfg queryConfig, fill func(q query)) url.Values {
+	q := newQuery(cfg.loc)
+	o.apply(q.Values, cfg.pageSizeParam)
 	fill(q)
 	for k, v := range params {
 		q.Set(k, v)

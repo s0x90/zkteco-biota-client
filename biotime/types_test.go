@@ -13,9 +13,6 @@ import (
 )
 
 func TestDateTimeJSON(t *testing.T) {
-	SetLocation(time.UTC)
-	t.Cleanup(func() { SetLocation(nil) })
-
 	cases := map[string]time.Time{
 		`"2024-06-26 17:16:09"`:        time.Date(2024, 6, 26, 17, 16, 9, 0, time.UTC),
 		`"2024-06-26T17:16:09"`:        time.Date(2024, 6, 26, 17, 16, 9, 0, time.UTC),
@@ -54,9 +51,6 @@ func TestDateTimeJSON(t *testing.T) {
 }
 
 func TestDateJSON(t *testing.T) {
-	SetLocation(time.UTC)
-	t.Cleanup(func() { SetLocation(nil) })
-
 	var d Date
 	if err := json.Unmarshal([]byte(`"2018-06-26"`), &d); err != nil {
 		t.Fatal(err)
@@ -307,9 +301,6 @@ func TestPageShapes(t *testing.T) {
 }
 
 func TestEmployeeExtraFields(t *testing.T) {
-	SetLocation(time.UTC)
-	t.Cleanup(func() { SetLocation(nil) })
-
 	in := `{
 		"id": 1, "emp_code": "1", "first_name": "Harry", "last_name": "Potter",
 		"department": {"id": 1, "dept_code": "1", "dept_name": "Department"},
@@ -361,9 +352,6 @@ func TestEmployeeExtraFields(t *testing.T) {
 // where the attendance flags are top level and the record carries the
 // self-service password hash.
 func TestEmployeeLegacyShape(t *testing.T) {
-	SetLocation(time.UTC)
-	t.Cleanup(func() { SetLocation(nil) })
-
 	in := `{
 		"id": 4, "emp_code": "1", "first_name": "admin", "last_name": null, "nickname": null,
 		"device_password": "135790", "card_no": null,
@@ -451,11 +439,6 @@ func TestEmployeeLegacyShape(t *testing.T) {
 }
 
 func TestEmployeeParamsJSON(t *testing.T) {
-	// NewDate takes the calendar date in Location(); pin it so the expected
-	// value does not depend on where the test runs.
-	SetLocation(time.UTC)
-	t.Cleanup(func() { SetLocation(nil) })
-
 	p := EmployeeParams{
 		EmpCode:    new("employee333"),
 		FirstName:  new("emp3"),
@@ -523,8 +506,6 @@ func TestDaylightSavingEdges(t *testing.T) {
 		// the two hours a year a naive timestamp cannot describe.
 		t.Fatalf("zone database unavailable with time/tzdata embedded: %v", err)
 	}
-	SetLocation(nyc)
-	t.Cleanup(func() { SetLocation(nil) })
 
 	// The hour the spring transition skips does not exist: the value is
 	// normalized to a neighboring instant and does not round-trip.
@@ -532,6 +513,7 @@ func TestDaylightSavingEdges(t *testing.T) {
 	if err := gap.UnmarshalJSON([]byte(`"2025-03-09 02:30:00"`)); err != nil {
 		t.Fatal(err)
 	}
+	gap.localize(nyc)
 	if got := gap.String(); got != "2025-03-09 01:30:00" {
 		t.Errorf("skipped hour re-encodes as %q", got)
 	}
@@ -542,6 +524,7 @@ func TestDaylightSavingEdges(t *testing.T) {
 	if err := dup.UnmarshalJSON([]byte(`"2025-11-02 01:30:00"`)); err != nil {
 		t.Fatal(err)
 	}
+	dup.localize(nyc)
 	if got := dup.UTC().Format(time.RFC3339); got != "2025-11-02T05:30:00Z" {
 		t.Errorf("repeated hour resolves to %s, want the earlier instant", got)
 	}
@@ -555,6 +538,7 @@ func TestDaylightSavingEdges(t *testing.T) {
 	if err := ok.UnmarshalJSON([]byte(`"2025-06-15 14:05:00"`)); err != nil {
 		t.Fatal(err)
 	}
+	ok.localize(nyc)
 	if got := ok.String(); got != "2025-06-15 14:05:00" {
 		t.Errorf("ordinary timestamp re-encodes as %q", got)
 	}
@@ -592,25 +576,86 @@ func TestPunchStateString(t *testing.T) {
 }
 
 func TestTimeEncodingUsesServerZone(t *testing.T) {
-	// The process runs in UTC, the server is at UTC+3: encoded values must
-	// carry the server's wall clock, and dates must be the server's date.
-	SetLocation(time.FixedZone("srv", 3*3600))
-	t.Cleanup(func() { SetLocation(nil) })
+	// The process runs in UTC, the server is at UTC+3: values built through
+	// the client carry the server's wall clock, and dates are the server's
+	// date. NewDate and NewDateTime themselves keep the zone they are given.
+	srv := time.FixedZone("srv", 3*3600)
+	c, err := New("http://x", WithLocation(srv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Location() != srv {
+		t.Errorf("Location() = %v", c.Location())
+	}
 
 	instant := time.Date(2024, 6, 26, 22, 30, 0, 0, time.UTC) // 01:30 next day on the server
-	if got := NewDateTime(instant).String(); got != "2024-06-27 01:30:00" {
+	if got := c.DateTime(instant).String(); got != "2024-06-27 01:30:00" {
 		t.Errorf("DateTime: %s", got)
 	}
-	out, _ := json.Marshal(NewDateTime(instant))
+	out, _ := json.Marshal(c.DateTime(instant))
 	if string(out) != `"2024-06-27 01:30:00"` {
 		t.Errorf("DateTime JSON: %s", out)
 	}
-	if got := NewDate(instant).String(); got != "2024-06-27" {
+	if got := c.Date(instant).String(); got != "2024-06-27" {
 		t.Errorf("Date: %s", got)
 	}
-	// Round trip: what the server sent comes back unchanged.
+	if got := NewDate(instant).String(); got != "2024-06-26" {
+		t.Errorf("NewDate keeps the zone of its argument: %s", got)
+	}
+	if got := NewDateTime(instant).String(); got != "2024-06-26 22:30:00" {
+		t.Errorf("NewDateTime keeps the zone of its argument: %s", got)
+	}
+	// A zero time stays zero through every constructor, in a zone where
+	// the zero instant has a calendar date of its own, so that a missing
+	// date is omitted from params rather than sent as year 1.
+	var zero time.Time
+	for name, isZero := range map[string]bool{
+		"Client.Date": c.Date(zero).IsZero(), "Client.DateTime": c.DateTime(zero).IsZero(),
+		"NewDate": NewDate(zero.In(srv)).IsZero(), "NewDateTime": NewDateTime(zero).IsZero(),
+	} {
+		if !isZero {
+			t.Errorf("%s(zero) is not zero", name)
+		}
+	}
+	if out, _ := json.Marshal(EmployeeParams{HireDate: c.Date(zero), Birthday: c.Date(zero)}); string(out) != "{}" {
+		t.Errorf("zero dates in params encode as %s, want {}", out)
+	}
+
+	// A decoded value is the wall clock labeled UTC until a service
+	// resolves it; resolved, it keeps its digits and gains the zone, so
+	// what the server sent comes back unchanged.
 	var d DateTime
-	if err := json.Unmarshal([]byte(`"2024-06-27 01:30:00"`), &d); err != nil || d.String() != "2024-06-27 01:30:00" {
-		t.Errorf("round trip: %v %v", d, err)
+	if err := json.Unmarshal([]byte(`"2024-06-27 01:30:00"`), &d); err != nil {
+		t.Fatal(err)
+	}
+	if d.Location() != time.UTC || d.String() != "2024-06-27 01:30:00" {
+		t.Errorf("decoded: %v %v", d.Location(), d)
+	}
+	d.localize(srv)
+	if d.Location() != srv || d.String() != "2024-06-27 01:30:00" || !d.Equal(instant) {
+		t.Errorf("resolved: %v %v", d.Location(), d)
+	}
+	// Resolving twice is a no-op: the value is an instant by then.
+	d.localize(time.UTC)
+	if d.String() != "2024-06-26 22:30:00" || !d.Equal(instant) {
+		t.Errorf("converted: %v", d)
+	}
+	// A value that came with a zone is an instant from the start and is
+	// converted, never relabeled.
+	var zoned DateTime
+	if err := json.Unmarshal([]byte(`"2024-06-26T22:30:00Z"`), &zoned); err != nil {
+		t.Fatal(err)
+	}
+	zoned.localize(srv)
+	if zoned.String() != "2024-06-27 01:30:00" || !zoned.Equal(instant) {
+		t.Errorf("zoned: %v", zoned)
+	}
+	var day Date
+	if err := json.Unmarshal([]byte(`"2024-06-27"`), &day); err != nil {
+		t.Fatal(err)
+	}
+	day.localize(srv)
+	if !day.Equal(c.Date(instant).Time) {
+		t.Errorf("date: %v want %v", day, c.Date(instant))
 	}
 }

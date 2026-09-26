@@ -6,6 +6,7 @@ import (
 	"iter"
 	"net/url"
 	"reflect"
+	"time"
 )
 
 const terminalsPath = "/iclock/api/terminals/"
@@ -43,6 +44,14 @@ type Terminal struct {
 
 var terminalType = reflect.TypeFor[Terminal]()
 
+func (t *Terminal) recordID() int { return t.ID }
+
+// localize resolves the record's timestamps in the server's zone.
+func (t *Terminal) localize(loc *time.Location) {
+	t.LastActivity.localize(loc)
+	t.PushTime.localize(loc)
+}
+
 // UnmarshalJSON implements [json.Unmarshaler], capturing unknown members in
 // Extra.
 func (t *Terminal) UnmarshalJSON(b []byte) error {
@@ -74,11 +83,11 @@ type TerminalFilter struct {
 	Params map[string]string
 }
 
-func (f *TerminalFilter) values(pageSizeParam string) url.Values {
+func (f *TerminalFilter) values(cfg queryConfig) url.Values {
 	if f == nil {
 		return url.Values{}
 	}
-	return buildQuery(f.ListOptions, f.Params, pageSizeParam, func(q query) {
+	return buildQuery(f.ListOptions, f.Params, cfg, func(q query) {
 		q.str("sn", f.SN)
 		q.str("alias", f.Alias)
 		q.str("ip_address", f.IPAddress)

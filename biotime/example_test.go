@@ -18,12 +18,12 @@ func Example() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	biotime.SetLocation(loc)
 
 	client, err := biotime.New("http://biotime.example.com:8080",
 		biotime.WithVersion(biotime.Version8),
 		biotime.WithAuthScheme(biotime.AuthJWT),
 		biotime.WithCredentials("admin", "secret"),
+		biotime.WithLocation(loc),
 	)
 	if err != nil {
 		log.Fatal(err)

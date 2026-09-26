@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -21,65 +20,76 @@ const (
 	DateLayout     = "2006-01-02"
 )
 
-// location is the zone applied when decoding naive timestamps and when
-// encoding them, in filters and in request bodies alike. Decoding happens in
-// [json.Unmarshaler] implementations that have no access to a client, so the
-// setting is package wide. See [SetLocation]. A nil value means [time.Local].
-var location atomic.Pointer[time.Location]
-
-// Location returns the zone used to interpret the server's naive timestamps.
-// The default is [time.Local].
-func Location() *time.Location {
-	if l := location.Load(); l != nil {
-		return l
-	}
-	return time.Local
+// timeLayout is a layout the server has been seen to use, and whether it
+// carries a zone. A layout without one yields a naive wall clock that the
+// client resolves in the server's zone; one with a zone names an instant.
+type timeLayout struct {
+	layout string
+	zoned  bool
 }
-
-// SetLocation sets the zone used to interpret the naive (zone-less)
-// timestamps the server returns and to format the ones the client sends.
-// ZKBio Time stores wall-clock times without zone information, so this must
-// match the server's zone; the default of [time.Local] is wrong whenever the
-// program runs in a different zone than the server, which is the norm in
-// containers. Passing nil restores [time.Local].
-//
-// A zone that observes daylight saving cannot express every timestamp the
-// server may send: the hour a transition skips does not exist, and the hour
-// it repeats is ambiguous. Neither is reported as an error; see parseTime
-// for what happens instead. A server kept in UTC, or any zone without
-// daylight saving, has neither problem.
-func SetLocation(loc *time.Location) { location.Store(loc) }
 
 // dateTimeLayouts lists the timestamp formats observed across server
 // generations, most common first.
-var dateTimeLayouts = []string{
-	DateTimeLayout,
-	"2006-01-02T15:04:05",
-	"2006-01-02 15:04:05.999999",
-	"2006-01-02T15:04:05.999999",
-	time.RFC3339Nano,
-	time.RFC3339,
-	DateLayout,
+var dateTimeLayouts = []timeLayout{
+	{DateTimeLayout, false},
+	{"2006-01-02T15:04:05", false},
+	{"2006-01-02 15:04:05.999999", false},
+	{"2006-01-02T15:04:05.999999", false},
+	{time.RFC3339Nano, true},
+	{time.RFC3339, true},
+	{DateLayout, false},
 }
 
-// DateTime is a timestamp encoded as "2006-01-02 15:04:05" in the server's
-// zone (see [Location]); the instant is converted to that zone on encoding.
-// A JSON null or empty string decodes to the zero value, and the zero value
+// dateLayouts lists the formats a date member has been seen in.
+var dateLayouts = []timeLayout{
+	{DateLayout, false},
+	{DateTimeLayout, false},
+	{"2006-01-02T15:04:05", false},
+	{time.RFC3339, true},
+}
+
+// localizable is implemented by the types that carry the server's naive
+// timestamps. The services call it on every record they decode, with the
+// client's zone; see [WithLocation].
+type localizable interface {
+	localize(*time.Location)
+}
+
+// DateTime is a timestamp encoded as "2006-01-02 15:04:05", the wall-clock
+// time in the value's own zone. Values decoded by the services carry the
+// server's zone ([Client.Location]); build values for a request body with
+// [Client.DateTime], which converts an instant to that zone first. A JSON
+// null or empty string decodes to the zero value, and the zero value
 // encodes as null.
+//
+// The server sends its timestamps without a zone. [DateTime.UnmarshalJSON]
+// cannot know the client's, so it reads such a value as the wall clock
+// labeled UTC and the service resolves it in the client's zone afterwards.
+// A value decoded outside the services keeps the UTC label.
+//
+// The struct carries decoding state besides the time, so compare values
+// with [time.Time.Equal]; == and reflect.DeepEqual are not meaningful.
 type DateTime struct {
 	time.Time
+	// naive marks a decoded wall clock that has not been resolved in the
+	// server's zone yet.
+	naive bool
 }
 
-// NewDateTime wraps t.
-func NewDateTime(t time.Time) DateTime { return DateTime{Time: t} }
+// NewDateTime wraps t. A zero t yields the zero value.
+func NewDateTime(t time.Time) DateTime {
+	if t.IsZero() {
+		return DateTime{}
+	}
+	return DateTime{Time: t}
+}
 
-// String formats the value with [DateTimeLayout] in the zone returned by
-// [Location].
+// String formats the value with [DateTimeLayout] in its own zone.
 func (d DateTime) String() string {
 	if d.IsZero() {
 		return ""
 	}
-	return d.In(Location()).Format(DateTimeLayout)
+	return d.Format(DateTimeLayout)
 }
 
 // MarshalJSON implements [json.Marshaler].
@@ -97,31 +107,49 @@ func (d *DateTime) UnmarshalJSON(b []byte) error {
 		return fmt.Errorf("biotime: DateTime: %w", err)
 	}
 	if !ok {
-		d.Time = time.Time{}
+		*d = DateTime{}
 		return nil
 	}
-	t, err := parseTime(s, dateTimeLayouts)
+	t, naive, err := parseTime(s, dateTimeLayouts)
 	if err != nil {
 		return err
 	}
-	d.Time = t
+	*d = DateTime{Time: t, naive: naive}
 	return nil
 }
 
-// Date is a calendar date encoded as "2006-01-02". A JSON null or empty
-// string decodes to the zero value, and the zero value encodes as null.
-// Construct values with [NewDate] so that the date is taken in the server's
-// zone.
-type Date struct {
-	time.Time
+// localize resolves a decoded wall clock in loc, or converts a value that
+// came with a zone of its own.
+func (d *DateTime) localize(loc *time.Location) {
+	if d.IsZero() {
+		return
+	}
+	d.Time = resolve(d.Time, d.naive, loc)
+	d.naive = false
 }
 
-// NewDate returns the calendar date of the instant t in the zone returned by
-// [Location], which is the date the server would record for it.
+// Date is a calendar date encoded as "2006-01-02", in the value's own zone.
+// Values decoded by the services carry the server's zone; build values for
+// a request body with [Client.Date], which takes the calendar date of an
+// instant in that zone. A JSON null or empty string decodes to the zero
+// value, and the zero value encodes as null. Compare values with
+// [time.Time.Equal], as with [DateTime].
+type Date struct {
+	time.Time
+	naive bool
+}
+
+// NewDate returns the calendar date of t in the zone t carries. Convert t
+// to the server's zone first, or use [Client.Date], which does. A zero t
+// yields the zero value: the calendar date of the zero instant in any
+// other zone is a real date in year 1, which is not what a missing date
+// means.
 func NewDate(t time.Time) Date {
-	loc := Location()
-	y, m, d := t.In(loc).Date()
-	return Date{Time: time.Date(y, m, d, 0, 0, 0, 0, loc)}
+	if t.IsZero() {
+		return Date{}
+	}
+	y, m, d := t.Date()
+	return Date{Time: time.Date(y, m, d, 0, 0, 0, 0, t.Location())}
 }
 
 // String formats the value with [DateLayout].
@@ -147,34 +175,57 @@ func (d *Date) UnmarshalJSON(b []byte) error {
 		return fmt.Errorf("biotime: Date: %w", err)
 	}
 	if !ok {
-		d.Time = time.Time{}
+		*d = Date{}
 		return nil
 	}
-	t, err := parseTime(s, []string{DateLayout, DateTimeLayout, "2006-01-02T15:04:05", time.RFC3339})
+	t, naive, err := parseTime(s, dateLayouts)
 	if err != nil {
 		return err
 	}
-	d.Time = t
+	*d = Date{Time: t, naive: naive}
 	return nil
 }
 
-// parseTime resolves a naive timestamp against [Location].
-//
-// Two wall-clock times per year cannot be resolved from the input alone,
-// and neither is reported as an error: one inside the hour a daylight
-// saving transition skips does not exist, and [time.ParseInLocation]
-// normalizes it to a neighboring instant, so it does not round-trip; one
-// inside the hour a transition repeats exists twice, and resolves to the
-// earlier of the two. Run the server in a zone without daylight saving to
-// avoid both. See [SetLocation].
-func parseTime(s string, layouts []string) (time.Time, error) {
-	loc := Location()
-	for _, layout := range layouts {
-		if t, err := time.ParseInLocation(layout, s, loc); err == nil {
-			return t, nil
-		}
+// localize resolves a decoded date in loc. See [DateTime.localize].
+func (d *Date) localize(loc *time.Location) {
+	if d.IsZero() {
+		return
 	}
-	return time.Time{}, fmt.Errorf("biotime: cannot parse time %q", s)
+	d.Time = resolve(d.Time, d.naive, loc)
+	d.naive = false
+}
+
+// parseTime parses a timestamp. A layout without a zone yields the wall
+// clock labeled UTC and naive true; the caller resolves it in the server's
+// zone with resolve. A layout with a zone yields the instant it names.
+func parseTime(s string, layouts []timeLayout) (t time.Time, naive bool, err error) {
+	for _, l := range layouts {
+		t, err := time.ParseInLocation(l.layout, s, time.UTC)
+		if err != nil {
+			continue
+		}
+		return t, !l.zoned, nil
+	}
+	return time.Time{}, false, fmt.Errorf("biotime: cannot parse time %q", s)
+}
+
+// resolve places a decoded time in loc: a naive wall clock keeps its digits
+// and gains the zone, an instant is converted.
+//
+// Two wall-clock times per year cannot be resolved from the digits alone,
+// and neither is reported as an error: one inside the hour a daylight
+// saving transition skips does not exist, and [time.Date] normalizes it to
+// a neighboring instant, so it does not round-trip; one inside the hour a
+// transition repeats exists twice, and resolves to the earlier of the two.
+// Run the server in a zone without daylight saving to avoid both. See
+// [WithLocation].
+func resolve(t time.Time, naive bool, loc *time.Location) time.Time {
+	if !naive {
+		return t.In(loc)
+	}
+	y, mo, d := t.Date()
+	h, mi, s := t.Clock()
+	return time.Date(y, mo, d, h, mi, s, t.Nanosecond(), loc)
 }
 
 // jsonString decodes a JSON string. ok is false for null or "".
@@ -368,6 +419,13 @@ func (r Ref[T]) MarshalJSON() ([]byte, error) {
 		return []byte("null"), nil
 	}
 	return json.Marshal(r.ID)
+}
+
+// localize resolves the timestamps of an expanded object, if it has any.
+func (r *Ref[T]) localize(loc *time.Location) {
+	if l, ok := any(r.Object).(localizable); ok && r.Object != nil {
+		l.localize(loc)
+	}
 }
 
 // UnmarshalJSON implements [json.Unmarshaler].

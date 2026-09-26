@@ -61,10 +61,10 @@ it before reading a standard-library finding as a problem with the code.
 `make build` compiles the library and the example program and fails when the
 module gains a dependency: this client is dependency-free by design.
 
-`make test-tz` re-runs the suite in a zone west of UTC. `NewDate` and
-`DateTime` interpret the server's naive timestamps in the configured zone, and
-a test that accidentally relies on the host zone would pass on a runner at or
-east of UTC and fail elsewhere. The target marks the run, and `TestWestOfUTCRun`
+`make test-tz` re-runs the suite in a zone west of UTC. A client's zone
+defaults to `time.Local`, so a test that builds a client without
+`WithLocation` and asserts on a decoded timestamp relies on the host zone;
+such a test would pass on a runner at or east of UTC and fail elsewhere. The target marks the run, and `TestWestOfUTCRun`
 fails if the process turns out not to be west of UTC after all, so a host
 without a zone database cannot turn that run into a second UTC one that
 reports success. The IANA database is embedded in the test binary
