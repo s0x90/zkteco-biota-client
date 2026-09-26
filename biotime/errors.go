@@ -55,9 +55,6 @@ const (
 	// VerdictUnverified: the read-back failed; see
 	// [UnsupportedFieldError.Cause].
 	VerdictUnverified FieldVerdict = "unverified"
-	// VerdictNoID: the write response carried no identifier, so there was
-	// nothing to read back.
-	VerdictNoID FieldVerdict = "write response carried no id"
 )
 
 // definitive reports whether the verdict refutes the write, as opposed to
@@ -68,16 +65,16 @@ func (v FieldVerdict) definitive() bool {
 
 // UnsupportedFieldError reports the outcome of a write the server accepted
 // whose requested fields could not all be confirmed on the record. Employee
-// is the record as the server holds it after the write; for a create it
-// exists on the server, and correcting or removing it is the caller's
-// decision, the client never deletes on its own.
+// is the record as the server holds it after the write, and the method
+// that failed returns it alongside the error; for a create it exists on
+// the server, and correcting or removing it is the caller's decision, the
+// client never deletes on its own.
 //
 // A definitive verdict ([VerdictIgnored], [VerdictNotReported]) matches
-// [ErrUnsupportedField] with [errors.Is]. The others ([VerdictUnverified],
-// [VerdictNoID]) match [ErrUnverified]; the fields are then neither
-// confirmed nor refuted, Cause is reachable with [errors.Is] and
-// [errors.As] through Unwrap, and the right reaction is to read the record
-// again, not to repeat the write.
+// [ErrUnsupportedField] with [errors.Is]. [VerdictUnverified] matches
+// [ErrUnverified]; the fields are then neither confirmed nor refuted, Cause
+// is reachable with [errors.Is] and [errors.As] through Unwrap, and the
+// right reaction is to read the record again, not to repeat the write.
 type UnsupportedFieldError struct {
 	// Field is the JSON name of the request member the verdict is about;
 	// empty when the verdict is not about a single field.

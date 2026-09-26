@@ -124,6 +124,18 @@ type Transaction struct {
 
 var transactionType = reflect.TypeFor[Transaction]()
 
+func (t *Transaction) recordID() int { return t.ID }
+
+// localize resolves the record's timestamps, and those of the expanded
+// employee and terminal, in the server's zone.
+func (t *Transaction) localize(loc *time.Location) {
+	t.PunchTime.localize(loc)
+	t.UploadTime.localize(loc)
+	t.SyncTime.localize(loc)
+	t.Emp.localize(loc)
+	t.Terminal.localize(loc)
+}
+
 // UnmarshalJSON implements [json.Unmarshaler], capturing unknown members in
 // Extra.
 func (t *Transaction) UnmarshalJSON(b []byte) error {
@@ -161,11 +173,11 @@ type TransactionFilter struct {
 	Params map[string]string
 }
 
-func (f *TransactionFilter) values(pageSizeParam string) url.Values {
+func (f *TransactionFilter) values(cfg queryConfig) url.Values {
 	if f == nil {
 		return url.Values{}
 	}
-	return buildQuery(f.ListOptions, f.Params, pageSizeParam, func(q query) {
+	return buildQuery(f.ListOptions, f.Params, cfg, func(q query) {
 		q.str("emp_code", f.EmpCode)
 		q.str("terminal_sn", f.TerminalSN)
 		q.str("terminal_alias", f.TerminalAlias)

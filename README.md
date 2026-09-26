@@ -46,10 +46,12 @@ for the ADMS push protocol.
   everything else is shared.
 - **Zero dependencies.** Pure standard library, Go 1.27+.
 - **Typed services** for employees, departments, areas, positions, terminals
-  and transactions, plus an escape hatch (`Do`, `Get`, `Post`) for every
-  other endpoint.
+  and transactions, plus an escape hatch (`Do`, `Get`, `Post`, `DoRaw`) for
+  every other endpoint.
 - **Lazy login and transparent re-login** on `401`, so long-running programs
-  survive JWT expiry.
+  survive JWT expiry, with a backoff that keeps a bad password or a wrong
+  auth scheme from becoming a login per request.
+- **One zone per client**, so a process can serve servers in several.
 - **Iterator-based pagination** (`iter.Seq2`) that follows the server's
   `next` links on demand, stops when you `break`, and refuses to loop on a
   server that repeats a page.
@@ -187,6 +189,13 @@ endpoint.
   `400` that carries Django REST framework's JSON message or field errors.
   An edge device's HTML block page is refused like any other request but
   suspends nothing.
+- A token the client just obtained that the server rejects before accepting
+  a single request with it is not expiry: the server never honored the
+  token, which is what a wrong `WithAuthScheme` or a revoked account looks
+  like. Logging in again would not change that, so the same one-minute
+  suspension applies, the token is dropped, and the error names the scheme.
+  Without it a fleet of workers would turn a config typo into a password
+  check per request on the server.
 - Without a token and without credentials, the first request fails with
   `ErrNoCredentials`.
 
@@ -294,7 +303,7 @@ emp, err := client.Employees.Create(ctx, &biotime.EmployeeParams{
 	LastName:   new("Potter"),
 	Department: new(1),
 	Area:       []int{1},
-	HireDate:   biotime.NewDate(time.Now()),
+	HireDate:   client.Date(time.Now()), // the calendar date in the server's zone
 	Extra:      map[string]any{"Passport": "AB123"}, // custom fields defined in the server UI
 })
 
@@ -304,7 +313,11 @@ err = client.Employees.Delete(ctx, emp.ID)
 ```
 
 On create the server requires `EmpCode`, `Department` and `Area`; 9.0 also
-requires `FirstName`. Custom attributes that the administrator added in the
+requires `FirstName`. `Get`, `Create` and `Update` decode a single record
+with the same discipline as a page: a 9.0 `{code,msg,data}` envelope is
+unwrapped and a non-zero code is an `*Error`, and a body without an `id`,
+such as a proxy's JSON page or a misrouted request, is an error rather than
+record 0. Identifiers are positive; `Get(0)` is refused without a request. Custom attributes that the administrator added in the
 server UI come back in `Employee.Extra` as raw JSON and are written through
 `EmployeeParams.Extra`. A key set both on the struct and in `Extra` is an
 encoding error rather than a silent choice between the two.
@@ -319,11 +332,21 @@ such members on a server that nests them differently, so after a `Create` or
 - Every flag matches: the record is returned.
 - A flag differs, or the record does not carry it at all: the error is an
   `*UnsupportedFieldError` matching `ErrUnsupportedField`. The write has
-  nevertheless happened; on create the employee exists. The error carries the
-  record, and the client never deletes on its own.
+  nevertheless happened; on create the employee exists. The record is
+  returned **together with the error**, so a caller that only checks the
+  error still has the identifier; the client never deletes on its own.
 - The read-back itself failed: the error matches `ErrUnverified` instead,
   carries the record and the cause, and the fields are neither confirmed nor
   refuted. Read the record again rather than repeating the write.
+
+```go
+emp, err := client.Employees.Create(ctx, &biotime.EmployeeParams{EmpCode: new("1042"), EnableAtt: new(true)})
+var unsupported *biotime.UnsupportedFieldError
+if errors.As(err, &unsupported) {
+	// emp is non-nil: the employee exists, only the flag is in doubt.
+	fmt.Println("created", emp.ID, "but", unsupported.Field, unsupported.Reason)
+}
+```
 
 ## Endpoints the package does not model
 
@@ -360,6 +383,24 @@ defer f.Close()
 err = client.Do(ctx, http.MethodPost, "/personnel/api/employees/42/photo/", nil,
 	biotime.TypedBody{ContentType: "image/png", Content: f}, nil)
 ```
+
+`Do` decodes JSON. For an endpoint that answers with something else, such
+as a photo or a report export, or when the status and headers matter,
+`DoRaw` returns the response undecoded, with the same authentication, retry
+and error mapping:
+
+```go
+resp, err := client.DoRaw(ctx, http.MethodGet, "/personnel/api/employees/42/photo/", nil, nil)
+if err != nil {
+	return err
+}
+_ = os.WriteFile("42.png", resp.Body, 0o600) // resp.Header carries the Content-Type
+```
+
+Records decoded through `Do` into this package's types (`*biotime.Transaction`,
+`*biotime.Employee`, ...) get their timestamps resolved in the client's
+zone like the services do; into any other type a `DateTime` carries the
+server's wall clock labeled UTC.
 
 ## Errors
 
@@ -410,20 +451,26 @@ the link.
 ## Time zones
 
 ZKBio Time stores and returns wall-clock times without zone information. The
-client interprets them, and encodes every `DateTime`, `Date` and
-`StartTime`/`EndTime` filter it sends, in the zone returned by
-`biotime.Location()`, which defaults to `time.Local`. That default is wrong
-whenever the program runs in a different zone than the server, which is the
-norm in containers (UTC), so call `biotime.SetLocation` once at start-up:
+client resolves the ones it receives, and formats the `StartTime`/`EndTime`
+filters it sends, in the zone given with `WithLocation`, which defaults to
+`time.Local`. That default is wrong whenever the program runs in a
+different zone than the server, which is the norm in containers (UTC):
 
 ```go
 loc, _ := time.LoadLocation("Europe/Moscow")
-biotime.SetLocation(loc)
+client, err := biotime.New("http://biotime.example.com:8080",
+	biotime.WithCredentials("admin", "secret"),
+	biotime.WithLocation(loc),
+)
 ```
 
-The setting is package wide: one process talks to servers in one zone.
-Construct dates with `biotime.NewDate(t)`, which takes the calendar date of
-`t` in that zone, the date the server would record for it.
+The zone belongs to the client, so one process can serve servers in
+several zones, and nothing changes underneath a walk in progress. A
+`DateTime` or `Date` encodes as the wall clock of the zone it carries;
+build values for a request body with `client.DateTime(t)` and
+`client.Date(t)`, which convert an instant to the server's zone first, the
+way the server would record it. `biotime.NewDate(t)` and `NewDateTime(t)`
+keep the zone of `t`.
 
 ### Daylight saving
 
@@ -466,9 +513,10 @@ of its own.
 ## Credentials in records and logs
 
 - `WithLogger` logs the method, endpoint, status, size and duration of
-  every request at debug level. Tokens, passwords, request and response
-  bodies and query strings (which carry filter values such as names) are
-  never logged.
+  every request at debug level, and a rejected or suspended login at warn
+  level, so that the one event an operator must see reaches a production
+  log. Tokens, passwords, request and response bodies and query strings
+  (which carry filter values such as names) are never logged.
 - 8.x returns each employee's **device PIN in clear text** and the
   **self-service password hash**. The hash is dropped on decoding. The PIN
   is kept as `Employee.DevicePassword` of type `Secret`, which prints as
@@ -488,9 +536,10 @@ of its own.
 | `WithToken(t)` | pre-issued token |
 | `WithAuthScheme(s)` | `AuthToken` (default) or `AuthJWT` |
 | `WithHTTPClient(*http.Client)` | custom transport, TLS settings, proxies; set `CheckRedirect` to return `http.ErrUseLastResponse` |
-| `WithTimeout(d)` | per-request timeout of the default client (30s); no effect with `WithHTTPClient` |
+| `WithTimeout(d)` | bound on every request whose context has no deadline (30s), whatever HTTP client is in use |
 | `WithMaxBodySize(n)` | cap on buffered response bodies and reader request bodies (32 MiB) |
-| `WithLogger(*slog.Logger)` | debug-log every request (never logs tokens or passwords) |
+| `WithLogger(*slog.Logger)` | log every request at debug and a rejected or suspended login at warn (never logs tokens or passwords) |
+| `WithLocation(loc)` | the zone the server keeps its wall-clock times in (default `time.Local`) |
 | `WithUserAgent(s)` | custom `User-Agent` |
 | `WithLanguage(tag)` | `Accept-Language` for server error messages (default `en`; `""` sends none) |
 | `WithPageSizeParam(name)` | override the page size parameter for non-standard servers |
