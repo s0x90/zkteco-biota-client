@@ -22,11 +22,11 @@
 // # Time zones
 //
 // The server stores and returns wall-clock times with no zone. The client
-// interprets them in the zone returned by [Location], which defaults to
+// interprets them in the zone given with [WithLocation], which defaults to
 // [time.Local] and is therefore wrong whenever the program does not run in
-// the server's zone, the norm in containers. Call [SetLocation] once at
-// start-up. A zone that observes daylight saving cannot describe two hours
-// a year; see [SetLocation] for what happens to them.
+// the server's zone, the norm in containers. A zone that observes daylight
+// saving cannot describe two hours a year; see [WithLocation] for what
+// happens to them.
 //
 // Endpoints that this package does not model can be reached with [Client.Do].
 //

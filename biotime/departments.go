@@ -18,6 +18,8 @@ type Department struct {
 	ParentDeptName string          `json:"parent_dept_name,omitzero"`
 }
 
+func (d *Department) recordID() int { return d.ID }
+
 // DepartmentFilter selects departments in [DepartmentService.List].
 type DepartmentFilter struct {
 	ListOptions
@@ -29,11 +31,11 @@ type DepartmentFilter struct {
 	Params map[string]string
 }
 
-func (f *DepartmentFilter) values(pageSizeParam string) url.Values {
+func (f *DepartmentFilter) values(cfg queryConfig) url.Values {
 	if f == nil {
 		return url.Values{}
 	}
-	return buildQuery(f.ListOptions, f.Params, pageSizeParam, func(q query) {
+	return buildQuery(f.ListOptions, f.Params, cfg, func(q query) {
 		q.str("dept_code", f.DeptCode)
 		q.str("dept_name", f.DeptName)
 		q.int("parent_dept", f.ParentDept)

@@ -129,10 +129,13 @@ func WithAuthScheme(s AuthScheme) Option {
 }
 
 // WithHTTPClient sets the underlying [http.Client]. Use it to configure TLS,
-// proxies, or custom transports. The default client has a 30 second timeout
-// and does not follow redirects, because a followed redirect turns a POST
-// into a GET and silently decodes the wrong resource; a custom client should
-// set CheckRedirect to return [http.ErrUseLastResponse] for the same reason.
+// proxies, or custom transports. The default client does not follow
+// redirects, because a followed redirect turns a POST into a GET and
+// silently decodes the wrong resource; a custom client should set
+// CheckRedirect to return [http.ErrUseLastResponse] for the same reason.
+// The timeout set with [WithTimeout] applies to a custom client as well,
+// through the request context; a Timeout on the client itself is not
+// needed.
 func WithHTTPClient(hc *http.Client) Option {
 	return func(c *Client) error {
 		if hc == nil {
@@ -143,8 +146,11 @@ func WithHTTPClient(hc *http.Client) Option {
 	}
 }
 
-// WithTimeout sets the per-request timeout on the default HTTP client. It has
-// no effect when [WithHTTPClient] is also used.
+// WithTimeout bounds every single request, whatever HTTP client is in use;
+// a shorter deadline on the caller's context wins. The default is 30
+// seconds. A walk over many pages keeps its own long deadline while no one
+// page can hang longer than this, and a custom client with no Timeout of
+// its own cannot wait forever on a server that stopped answering.
 func WithTimeout(d time.Duration) Option {
 	return func(c *Client) error {
 		if d <= 0 {
@@ -210,14 +216,40 @@ func WithLanguage(tag string) Option {
 	}
 }
 
-// WithLogger enables debug logging of requests and responses through the
-// given [slog.Logger]. Credentials and tokens are never logged.
+// WithLogger enables logging through the given [slog.Logger]: every
+// request at [slog.LevelDebug], and a rejected or suspended login at
+// [slog.LevelWarn], so that the one event an operator must see reaches a
+// production log. Credentials and tokens are never logged.
 func WithLogger(l *slog.Logger) Option {
 	return func(c *Client) error {
 		if l == nil {
 			return errors.New("biotime: nil logger")
 		}
 		c.logger = l
+		return nil
+	}
+}
+
+// WithLocation sets the zone the server keeps its wall-clock times in. ZKBio
+// Time stores and returns timestamps without zone information; the client
+// resolves the ones it receives in this zone and formats the ones it sends,
+// in filters and through [Client.DateTime] and [Client.Date], the same way.
+// The default is [time.Local], which is wrong whenever the program runs in
+// a different zone than the server, the norm in containers. Each client has
+// its own zone, so one process can serve servers in several.
+//
+// A zone that observes daylight saving cannot express every timestamp the
+// server may send: the hour a transition skips does not exist, and the hour
+// it repeats is ambiguous. Neither is reported as an error; the skipped
+// hour is normalized to a neighboring instant and the repeated one resolves
+// to the earlier of the two. A server kept in UTC, or any zone without
+// daylight saving, has neither problem.
+func WithLocation(loc *time.Location) Option {
+	return func(c *Client) error {
+		if loc == nil {
+			return errors.New("biotime: nil location")
+		}
+		c.loc = loc
 		return nil
 	}
 }

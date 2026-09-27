@@ -423,6 +423,256 @@ func TestStaticTokenAndReauth(t *testing.T) {
 	if n := len(f.requests) - before; n != 3 {
 		t.Errorf("expected 3 requests (401, login, 401), got %d", n)
 	}
+	// The token from that login was never accepted and is now rejected
+	// again. One such rejection is tolerated as a transient: one more
+	// login, one more retry. A second fresh token rejected in a row is the
+	// verdict: no re-login, the token is dropped, the re-login suspended,
+	// and the request after that fails without reaching the server.
+	before = len(f.requests)
+	_, err = c.Areas.List(t.Context(), nil)
+	if !errors.Is(err, ErrUnauthorized) || strings.Contains(err.Error(), "just issued") {
+		t.Fatalf("first fresh rejection: got %v", err)
+	}
+	if n := len(f.requests) - before; n != 3 {
+		t.Errorf("expected 3 requests (401, login, 401), got %d", n)
+	}
+	before = len(f.requests)
+	_, err = c.Areas.List(t.Context(), nil)
+	if !errors.Is(err, ErrUnauthorized) || !strings.Contains(err.Error(), "just issued") {
+		t.Fatalf("second fresh rejection: got %v", err)
+	}
+	if n := len(f.requests) - before; n != 1 {
+		t.Errorf("expected 1 request (401), got %d", n)
+	}
+	before = len(f.requests)
+	_, err = c.Areas.List(t.Context(), nil)
+	if !errors.Is(err, ErrUnauthorized) || !strings.Contains(err.Error(), "suspended") {
+		t.Fatalf("got %v", err)
+	}
+	if n := len(f.requests) - before; n != 0 {
+		t.Errorf("expected no request while suspended, got %d", n)
+	}
+}
+
+// TestFreshTokenRejectedSuspendsRelogin covers the server that issues a
+// token and then refuses every request carrying it, which is what a wrong
+// AuthScheme looks like. Without the suspension every call would cost a
+// login, and a fleet of workers would turn a config typo into a password
+// check per request on the server. The first rejection is tolerated (see
+// TestTransientRejectionOfFreshTokenIsRetried); the second is the verdict.
+func TestFreshTokenRejectedSuspendsRelogin(t *testing.T) {
+	var logins, calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "token-auth") {
+			logins.Add(1)
+			fmt.Fprint(w, `{"token":"t"}`)
+			return
+		}
+		calls.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, `{"detail":"Invalid token header."}`)
+	}))
+	t.Cleanup(srv.Close)
+	var logged strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	c := newTestClient(t, srv, WithLogger(logger))
+	now := time.Now()
+	c.now = func() time.Time { return now }
+
+	for i := range 5 {
+		_, err := c.Employees.Get(t.Context(), 1)
+		if !errors.Is(err, ErrUnauthorized) {
+			t.Fatalf("call %d: got %v", i, err)
+		}
+		var apiErr *Error
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized {
+			t.Errorf("call %d: the server's 401 is not reachable: %v", i, err)
+		}
+		if i > 0 && !strings.Contains(err.Error(), `WithAuthScheme("Token")`) {
+			t.Errorf("call %d: the error does not name the likely cause: %v", i, err)
+		}
+	}
+	// Call 1: login, 401, login, 401. Call 2: 401, suspension. Calls 3
+	// to 5: refused without a request.
+	if logins.Load() != 2 || calls.Load() != 3 {
+		t.Errorf("5 calls cost %d logins and %d requests; want 2 and 3, then suspension", logins.Load(), calls.Load())
+	}
+	if c.Token() != "" {
+		t.Error("a token the server refused is still in use")
+	}
+	if out := logged.String(); !strings.Contains(out, "level=WARN msg=\"biotime: fresh token rejected again\"") || !strings.Contains(out, "level=WARN msg=\"biotime: automatic login suspended\"") {
+		t.Errorf("not logged as warnings:\n%s", out)
+	}
+
+	// After the backoff one more login is tried; the server has not
+	// accepted a token since, so the next rejection suspends at once.
+	now = now.Add(loginBackoff)
+	if _, err := c.Employees.Get(t.Context(), 1); !errors.Is(err, ErrUnauthorized) {
+		t.Fatal(err)
+	}
+	if logins.Load() != 3 || calls.Load() != 4 {
+		t.Errorf("after the backoff: %d logins and %d requests", logins.Load(), calls.Load())
+	}
+
+	// A token that worked once and is then rejected is expiry, and is
+	// still followed by exactly one re-login.
+	f, fsrv := newFakeServer(t, Version9, AuthToken)
+	f.handler = func(w http.ResponseWriter, r *http.Request) { f.page(w, 0, "") }
+	c = newTestClient(t, fsrv)
+	if _, err := c.Areas.List(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	f.reject.Store(1)
+	if _, err := c.Areas.List(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if f.logins != 2 {
+		t.Errorf("logins %d, want a re-login after the accepted token was rejected", f.logins)
+	}
+}
+
+// TestTransientRejectionOfFreshTokenIsRetried: one 401 on a fresh token
+// costs one more login, not a minute of refusals.
+func TestTransientRejectionOfFreshTokenIsRetried(t *testing.T) {
+	f, srv := newFakeServer(t, Version9, AuthToken)
+	f.handler = func(w http.ResponseWriter, r *http.Request) { f.page(w, 0, "") }
+	c := newTestClient(t, srv)
+	f.reject.Store(1)
+	if _, err := c.Areas.List(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if f.logins != 2 || len(f.requests) != 4 {
+		t.Errorf("logins %d requests %d; want login, 401, login, 200", f.logins, len(f.requests))
+	}
+	// The accepted token reset the count: the next fresh rejection is the
+	// first of a new sequence, not the second of the old one.
+	f.mu.Lock()
+	f.token = "rotated"
+	f.mu.Unlock()
+	f.reject.Store(2) // the rotated token's first request, then the re-login's first
+	before := len(f.requests)
+	_, err := c.Areas.List(t.Context(), nil)
+	if !errors.Is(err, ErrUnauthorized) || strings.Contains(err.Error(), "suspended") {
+		t.Fatalf("got %v", err)
+	}
+	if n := len(f.requests) - before; n != 3 {
+		t.Errorf("expected 3 requests (401, login, 401), got %d", n)
+	}
+	if c.Token() == "" {
+		t.Error("one fresh rejection must not drop the token")
+	}
+}
+
+// TestTimeoutBoundsEveryRequest: the per-request timeout applies on the
+// default client and on a custom one without a Timeout of its own, with a
+// background context and with a long deadline alike. A walk over many
+// pages keeps its own deadline while no one page can hang longer.
+func TestTimeoutBoundsEveryRequest(t *testing.T) {
+	f, srv := newFakeServer(t, Version9, AuthToken)
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}
+	longDeadline, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	for name, opts := range map[string][]Option{"default client": nil, "custom client": {WithHTTPClient(&http.Client{})}} {
+		for ctxName, ctx := range map[string]context.Context{"no deadline": context.Background(), "long deadline": longDeadline} {
+			t.Run(name+"/"+ctxName, func(t *testing.T) {
+				c := newTestClient(t, srv, append(opts, WithToken("tok-1"), WithTimeout(50*time.Millisecond))...)
+				start := time.Now()
+				_, err := c.Areas.Get(ctx, 1)
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Errorf("got %v", err)
+				}
+				if time.Since(start) > 5*time.Second {
+					t.Error("the client's timeout did not apply")
+				}
+			})
+		}
+	}
+}
+
+// TestFleetAgainstRefusingServerLogsInTwice: the property the strike
+// counter exists for, under concurrency. Eight workers against a server
+// that refuses every fresh token cost at most two logins per backoff
+// window, not one per worker or per call.
+func TestFleetAgainstRefusingServerLogsInTwice(t *testing.T) {
+	var logins atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "token-auth") {
+			logins.Add(1)
+			fmt.Fprint(w, `{"token":"t`+strconv.Itoa(int(logins.Load()))+`"}`)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, `{"detail":"Invalid token header."}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := newTestClient(t, srv)
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			for range 3 {
+				if _, err := c.Employees.Get(t.Context(), 1); !errors.Is(err, ErrUnauthorized) {
+					t.Errorf("got %v", err)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if n := logins.Load(); n > 2 {
+		t.Errorf("8 workers x 3 calls cost %d logins; want at most 2", n)
+	}
+}
+
+// TestGatewayStatusProvesNothing: a 502 from the proxy in front of a
+// server that is down does not mark the token as accepted, so a wrong
+// scheme discovered once the server is back costs no extra login. The
+// same holds for the other statuses a proxy answers on its own.
+func TestGatewayStatusProvesNothing(t *testing.T) {
+	var logins atomic.Int32
+	var down atomic.Bool
+	down.Store(true)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "token-auth") {
+			logins.Add(1)
+			fmt.Fprint(w, `{"token":"t`+strconv.Itoa(int(logins.Load()))+`"}`)
+			return
+		}
+		if down.Load() {
+			w.WriteHeader(http.StatusBadGateway)
+			fmt.Fprint(w, "<html>502</html>")
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, `{"detail":"Invalid token header."}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := newTestClient(t, srv)
+	var apiErr *Error
+	if _, err := c.Employees.Get(t.Context(), 1); !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadGateway {
+		t.Fatalf("got %v", err)
+	}
+	for _, status := range []int{http.StatusProxyAuthRequired, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+		if provesToken(status) {
+			t.Errorf("%d proves a token the server never saw", status)
+		}
+	}
+	for _, status := range []int{http.StatusOK, http.StatusForbidden, http.StatusNotFound, http.StatusInternalServerError} {
+		if !provesToken(status) {
+			t.Errorf("%d comes from the application and proves the token", status)
+		}
+	}
+	// Server back, token refused: the first refusal is strike one, since
+	// the 502 proved nothing, and the second suspends.
+	down.Store(false)
+	_, _ = c.Employees.Get(t.Context(), 1)
+	_, err := c.Employees.Get(t.Context(), 1)
+	if !errors.Is(err, ErrUnauthorized) || !strings.Contains(err.Error(), "just issued") {
+		t.Errorf("got %v", err)
+	}
+	if n := logins.Load(); n != 2 {
+		t.Errorf("logins %d, want 2 (initial, one more after strike one)", n)
+	}
 }
 
 func TestReauthWithoutCredentials(t *testing.T) {
@@ -453,6 +703,10 @@ func (f *fakeServer) loginRequests() int {
 func TestRejectedLoginIsNotRetriedPerRequest(t *testing.T) {
 	f, srv := newFakeServer(t, Version9, AuthToken)
 	f.handler = func(w http.ResponseWriter, r *http.Request) { f.page(w, 0, "") }
+	// The rejection and the start of the suspension are the events an
+	// operator must see, and go out as warnings; each refused request in
+	// the window is a debug line, or a fleet polling through the minute
+	// would flood the production log.
 	var logged strings.Builder
 	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	c := newTestClient(t, srv, WithCredentials("admin", "wrong"), WithLogger(logger))
@@ -475,8 +729,12 @@ func TestRejectedLoginIsNotRetriedPerRequest(t *testing.T) {
 	}
 	// The refusals are visible in the trace and the error says so while
 	// still matching the rejection's sentinels.
-	if !strings.Contains(logged.String(), "login suspended") {
-		t.Error("suspended logins were not logged")
+	out := logged.String()
+	if !strings.Contains(out, "level=WARN msg=\"biotime: login rejected\"") || strings.Count(out, "level=WARN msg=\"biotime: automatic login suspended\"") != 1 {
+		t.Errorf("rejection and suspension are not logged once each as warnings:\n%s", out)
+	}
+	if !strings.Contains(out, "level=DEBUG msg=\"biotime: login suspended after rejection\"") || strings.Contains(out, "level=WARN msg=\"biotime: login suspended after rejection\"") {
+		t.Errorf("refused requests must be debug lines, not warnings:\n%s", out)
 	}
 	if _, err := c.Positions.List(t.Context(), nil); err == nil || !strings.Contains(err.Error(), "suspended") || !errors.Is(err, ErrValidation) {
 		t.Errorf("got %v", err)
@@ -935,10 +1193,11 @@ func TestEmployeeFlagWriteIsVerified(t *testing.T) {
 	params := &EmployeeParams{EnableAtt: new(false)}
 	ctx := t.Context()
 
-	// Value present and different: ignored, no extra request.
+	// Value present and different: ignored, no extra request. The write
+	// happened, so the record is returned with the verdict.
 	e, err := c.Employees.Update(ctx, 7, params)
 	var ufe *UnsupportedFieldError
-	if e != nil || !errors.Is(err, ErrUnsupportedField) || !errors.As(err, &ufe) {
+	if e == nil || e.ID != 7 || !errors.Is(err, ErrUnsupportedField) || !errors.As(err, &ufe) {
 		t.Fatalf("got %+v %v", e, err)
 	}
 	if ufe.Field != "enable_att" || ufe.Reason != VerdictIgnored || ufe.Employee == nil || ufe.Employee.ID != 7 {
@@ -950,7 +1209,7 @@ func TestEmployeeFlagWriteIsVerified(t *testing.T) {
 	if gets.Load() != 0 {
 		t.Error("detail fetched although the write response carried the flag")
 	}
-	if e, err := c.Employees.Create(ctx, params); e != nil || !errors.As(err, &ufe) || ufe.Employee.ID != 7 {
+	if e, err := c.Employees.Create(ctx, params); e == nil || e.ID != 7 || !errors.As(err, &ufe) || ufe.Employee != e {
 		t.Errorf("create: %+v %v", e, err)
 	}
 
@@ -979,9 +1238,9 @@ func TestEmployeeFlagWriteIsVerified(t *testing.T) {
 	// The read-back fails: no verdict, the record and the cause are both
 	// reachable, and the sentinel does not match.
 	mode.Store(readBackFails)
-	_, err = c.Employees.Create(ctx, params)
-	if !errors.As(err, &ufe) || ufe.Reason != VerdictUnverified || ufe.Employee == nil || ufe.Employee.ID != 7 || ufe.Field != "" {
-		t.Fatalf("read-back failure: %v", err)
+	e, err = c.Employees.Create(ctx, params)
+	if !errors.As(err, &ufe) || ufe.Reason != VerdictUnverified || e == nil || e.ID != 7 || ufe.Employee != e || ufe.Field != "" {
+		t.Fatalf("read-back failure: %+v %v", e, err)
 	}
 	if errors.Is(err, ErrUnsupportedField) || !errors.Is(err, ErrUnverified) {
 		t.Error("an unverified write must match ErrUnverified, not ErrUnsupportedField")
@@ -997,11 +1256,12 @@ func TestEmployeeFlagWriteIsVerified(t *testing.T) {
 		t.Error(err)
 	}
 
-	// The write response carries no id: nothing to read back.
+	// The write response carries no id: it is not a record, and it is
+	// refused before any verdict rather than read back as employee 0.
 	mode.Store(noID)
 	gets.Store(0)
-	if _, err := c.Employees.Create(ctx, params); !errors.As(err, &ufe) || ufe.Reason != VerdictNoID || gets.Load() != 0 || !errors.Is(err, ErrUnverified) || errors.Is(err, ErrUnsupportedField) {
-		t.Errorf("no id: %v (gets %d)", err, gets.Load())
+	if e, err := c.Employees.Create(ctx, params); e != nil || err == nil || !strings.Contains(err.Error(), "no id") || errors.As(err, &ufe) || gets.Load() != 0 {
+		t.Errorf("no id: %+v %v (gets %d)", e, err, gets.Load())
 	}
 
 	// One requested flag echoed, another not: the detail view is consulted
@@ -1133,9 +1393,6 @@ func TestGetByCodeGivesUpOnTooManyCandidates(t *testing.T) {
 }
 
 func TestTransactionsFilterAndDecoding(t *testing.T) {
-	SetLocation(time.FixedZone("srv", 3*3600))
-	t.Cleanup(func() { SetLocation(nil) })
-
 	f, srv := newFakeServer(t, Version8, AuthJWT)
 	f.handler = func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"count":2,"next":null,"previous":null,"results":[
@@ -1146,7 +1403,7 @@ func TestTransactionsFilterAndDecoding(t *testing.T) {
 			 "temperature":null,"is_mask":null,"terminal":{"id":3,"sn":"X"},"custom":true}
 		]}`)
 	}
-	c := newTestClient(t, srv, WithVersion(Version8), WithAuthScheme(AuthJWT))
+	c := newTestClient(t, srv, WithVersion(Version8), WithAuthScheme(AuthJWT), WithLocation(time.FixedZone("srv", 3*3600)))
 
 	start := time.Date(2019, 3, 1, 0, 0, 0, 0, time.UTC)
 	page, err := c.Transactions.List(t.Context(), &TransactionFilter{
@@ -1565,5 +1822,192 @@ func TestIteratorIsRestartable(t *testing.T) {
 		if err != nil || len(got) != 2 || got[0].ID != 1 || got[1].ID != 2 {
 			t.Fatalf("run %d: %v %v", run, got, err)
 		}
+	}
+}
+
+// TestLocationIsPerClient: two servers in two zones from one process, and
+// a change of zone on one client never reaches the other.
+func TestLocationIsPerClient(t *testing.T) {
+	f, srv := newFakeServer(t, Version9, AuthToken)
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/transactions/"):
+			f.page(w, 1, "", json.RawMessage(`{"id":1,"emp_code":"1","punch_time":"2024-06-26 09:00:00",
+				"emp":{"id":5,"emp_code":"1","hire_date":"2024-06-01","update_time":"2024-06-25 08:00:00"},
+				"terminal":{"id":3,"sn":"X","last_activity":"2024-06-26 08:59:00"}}`))
+		case strings.HasSuffix(r.URL.Path, "/transactions/1/"):
+			fmt.Fprint(w, `{"id":1,"emp_code":"1","punch_time":"2024-06-26 09:00:00"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}
+	east := time.FixedZone("east", 3*3600)
+	west := time.FixedZone("west", -5*3600)
+	moscow := newTestClient(t, srv, WithLocation(east))
+	toronto := newTestClient(t, srv, WithLocation(west))
+
+	since := time.Date(2024, 6, 26, 0, 0, 0, 0, time.UTC)
+	var got [2]Transaction
+	for i, c := range []*Client{moscow, toronto} {
+		page, err := c.Transactions.List(t.Context(), &TransactionFilter{StartTime: since})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got[i] = page.Results[0]
+		want := since.In(c.Location()).Format(DateTimeLayout)
+		if q := f.lastQuery().Get("start_time"); q != want {
+			t.Errorf("%s: start_time %q want %q", c.Location(), q, want)
+		}
+	}
+	if got[0].PunchTime.Location() != east || got[1].PunchTime.Location() != west {
+		t.Errorf("zones: %v %v", got[0].PunchTime.Location(), got[1].PunchTime.Location())
+	}
+	// Same digits, eight hours apart as instants.
+	if got[0].PunchTime.String() != got[1].PunchTime.String() || got[1].PunchTime.Sub(got[0].PunchTime.Time) != 8*time.Hour {
+		t.Errorf("punch times: %v %v", got[0].PunchTime, got[1].PunchTime)
+	}
+	// Expanded objects are resolved too, dates included.
+	tx := got[0]
+	if tx.Emp.Object.UpdateTime.Location() != east || tx.Emp.Object.HireDate.Location() != east || tx.Terminal.Object.LastActivity.Location() != east {
+		t.Errorf("nested: %v %v %v", tx.Emp.Object.UpdateTime.Location(), tx.Emp.Object.HireDate.Location(), tx.Terminal.Object.LastActivity.Location())
+	}
+	if !tx.Emp.Object.HireDate.Equal(time.Date(2024, 6, 1, 0, 0, 0, 0, east)) {
+		t.Errorf("hire date: %v", tx.Emp.Object.HireDate)
+	}
+
+	// Get resolves like List does, and so does Do into a record type; into
+	// anything else the wall clock keeps its UTC label.
+	one, err := toronto.Transactions.Get(t.Context(), 1)
+	if err != nil || one.PunchTime.Location() != west {
+		t.Errorf("Get: %v %v", one, err)
+	}
+	var viaDo Transaction
+	if err := toronto.Get(t.Context(), "/iclock/api/transactions/1/", nil, &viaDo); err != nil || viaDo.PunchTime.Location() != west {
+		t.Errorf("Do: %v %v", viaDo.PunchTime.Location(), err)
+	}
+	var plain struct {
+		PunchTime DateTime `json:"punch_time"`
+	}
+	if err := toronto.Get(t.Context(), "/iclock/api/transactions/1/", nil, &plain); err != nil || plain.PunchTime.Location() != time.UTC || plain.PunchTime.String() != "2024-06-26 09:00:00" {
+		t.Errorf("Do into a plain struct: %v %v %v", plain.PunchTime.Location(), plain.PunchTime, err)
+	}
+
+	if _, err := New(srv.URL, WithLocation(nil)); err == nil {
+		t.Error("nil location accepted")
+	}
+	if c, _ := New(srv.URL); c.Location() != time.Local {
+		t.Errorf("default location %v", c.Location())
+	}
+}
+
+// TestDetailResponseIsARecord: a single-object response is decoded with
+// the same discipline as a page. A 9.0 envelope is unwrapped, a failure
+// envelope with HTTP 200 is an error, and a body without an identifier is
+// refused rather than returned as record 0.
+func TestDetailResponseIsARecord(t *testing.T) {
+	f, srv := newFakeServer(t, Version9, AuthToken)
+	var body atomic.Value
+	body.Store(`{"code":0,"msg":"success","data":{"id":42,"emp_code":"E1","update_time":"2024-06-26 09:00:00"}}`)
+	f.handler = func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body.Load().(string)) }
+	c := newTestClient(t, srv, WithLocation(time.FixedZone("srv", 3*3600)))
+	ctx := t.Context()
+
+	// Enveloped detail, on every path that decodes one record.
+	e, err := c.Employees.Get(ctx, 42)
+	if err != nil || e.ID != 42 || e.EmpCode != "E1" || e.UpdateTime.Location().String() != "srv" {
+		t.Fatalf("Get: %+v %v", e, err)
+	}
+	if _, present := e.Extra["code"]; present {
+		t.Error("envelope members reported as custom attributes")
+	}
+	if e, err := c.Employees.Create(ctx, &EmployeeParams{EmpCode: new("E1")}); err != nil || e.ID != 42 {
+		t.Errorf("Create: %+v %v", e, err)
+	}
+	if e, err := c.Employees.Update(ctx, 42, &EmployeeParams{CardNo: new("1")}); err != nil || e.ID != 42 {
+		t.Errorf("Update: %+v %v", e, err)
+	}
+
+	// A failure envelope with HTTP 200 is an error carrying the code.
+	body.Store(`{"code":1,"msg":"employee does not exist"}`)
+	var apiErr *Error
+	if _, err := c.Employees.Get(ctx, 42); !errors.As(err, &apiErr) || apiErr.Code != 1 || apiErr.Message != "employee does not exist" {
+		t.Errorf("failure envelope: %v", err)
+	}
+	// A body without an id is not a record, whatever shape it has. On a
+	// read that is a bad answer; on a write the server said 2xx, so the
+	// error says the write may have happened and matches its sentinel.
+	for _, b := range []string{`{"emp_code":"E1"}`, `{"detail":"maintenance"}`, `{"code":0,"msg":"ok","data":{"emp_code":"E1"}}`, `{"code":0,"msg":"ok","data":null}`} {
+		body.Store(b)
+		if e, err := c.Employees.Get(ctx, 42); e != nil || err == nil || !errors.Is(err, errNotARecord) || errors.Is(err, ErrWriteUnconfirmed) {
+			t.Errorf("Get %s: %+v %v", b, e, err)
+		}
+		if e, err := c.Employees.Create(ctx, &EmployeeParams{EmpCode: new("E1")}); e != nil || !errors.Is(err, ErrWriteUnconfirmed) {
+			t.Errorf("Create %s: %+v %v", b, e, err)
+		}
+		if e, err := c.Employees.Update(ctx, 42, &EmployeeParams{CardNo: new("1")}); e != nil || !errors.Is(err, ErrWriteUnconfirmed) || !strings.HasPrefix(err.Error(), ErrWriteUnconfirmed.Error()) {
+			t.Errorf("Update %s: %+v %v", b, e, err)
+		}
+	}
+	// A record with a custom attribute named "code" is a record: the
+	// envelope is recognized by its shape, not by one member.
+	body.Store(`{"id":5,"emp_code":"E5","code":"ABC"}`)
+	if e, err := c.Employees.Get(ctx, 5); err != nil || e.ID != 5 || string(e.Extra["code"]) != `"ABC"` {
+		t.Errorf("record with a code attribute: %+v %v", e, err)
+	}
+	body.Store(`{"id":6,"emp_code":"E6","code":7,"msg":"custom"}`)
+	if e, err := c.Employees.Get(ctx, 6); err != nil || e.ID != 6 {
+		t.Errorf("record with numeric code and msg attributes: %+v %v", e, err)
+	}
+
+	// Identifiers are positive; nothing is sent for anything else.
+	before := len(f.requests)
+	if _, err := c.Employees.Get(ctx, 0); err == nil {
+		t.Error("Get(0) accepted")
+	}
+	if _, err := c.Employees.Update(ctx, -1, &EmployeeParams{}); err == nil {
+		t.Error("Update(-1) accepted")
+	}
+	if err := c.Employees.Delete(ctx, 0); err == nil {
+		t.Error("Delete(0) accepted")
+	}
+	if n := len(f.requests) - before; n != 0 {
+		t.Errorf("%d requests sent for invalid ids", n)
+	}
+}
+
+func TestDoRaw(t *testing.T) {
+	f, srv := newFakeServer(t, Version9, AuthToken)
+	png := "\x89PNG\r\n\x1a\n binary"
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/personnel/api/employees/42/photo/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Content-Disposition", `attachment; filename="42.png"`)
+		fmt.Fprint(w, png)
+	}
+	c := newTestClient(t, srv)
+
+	// Authenticated like Do, undecoded, with status and headers.
+	resp, err := c.DoRaw(t.Context(), http.MethodGet, "/personnel/api/employees/42/photo/", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || string(resp.Body) != png || resp.Header.Get("Content-Disposition") != `attachment; filename="42.png"` {
+		t.Errorf("%+v", resp)
+	}
+	if f.logins != 1 || f.lastRequest().Header.Get("Authorization") != "Token tok-1" {
+		t.Error("DoRaw did not authenticate")
+	}
+	// The re-authentication retry applies too.
+	f.reject.Store(1)
+	if _, err := c.DoRaw(t.Context(), http.MethodGet, "/personnel/api/employees/42/photo/", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	// A non-2xx answer is an *Error, as with Do.
+	var apiErr *Error
+	if _, err := c.DoRaw(t.Context(), http.MethodGet, "/nope/", nil, nil); !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound {
+		t.Errorf("got %v", err)
 	}
 }

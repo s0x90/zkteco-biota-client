@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"time"
 )
 
 const (
@@ -99,6 +100,15 @@ type AttEmployee struct {
 
 var employeeType = reflect.TypeFor[Employee]()
 
+func (e *Employee) recordID() int { return e.ID }
+
+// localize resolves the record's timestamps in the server's zone.
+func (e *Employee) localize(loc *time.Location) {
+	e.HireDate.localize(loc)
+	e.Birthday.localize(loc)
+	e.UpdateTime.localize(loc)
+}
+
 // flag returns the attendance setting from whichever shape the server used:
 // the 8.x top-level field when present, else the 9.0 nested object. ok is
 // false when neither carried it.
@@ -172,11 +182,11 @@ type EmployeeFilter struct {
 	Params map[string]string
 }
 
-func (f *EmployeeFilter) values(pageSizeParam string) url.Values {
+func (f *EmployeeFilter) values(cfg queryConfig) url.Values {
 	if f == nil {
 		return url.Values{}
 	}
-	return buildQuery(f.ListOptions, f.Params, pageSizeParam, func(q query) {
+	return buildQuery(f.ListOptions, f.Params, cfg, func(q query) {
 		q.str("emp_code", f.EmpCode)
 		q.str("first_name", f.FirstName)
 		q.str("last_name", f.LastName)
@@ -250,31 +260,35 @@ type EmployeeService struct {
 
 // Create adds an employee. See [EmployeeParams] for the required fields.
 // When params set an attendance flag that the server did not apply, the
-// employee has nevertheless been created and the error is an
-// [*UnsupportedFieldError] carrying the record; the client does not delete
-// it.
+// employee has nevertheless been created: the record is returned together
+// with an [*UnsupportedFieldError], so that a caller who only checks the
+// error does not lose the identifier of a record that now exists. The
+// client does not delete it.
 func (s *EmployeeService) Create(ctx context.Context, params *EmployeeParams) (*Employee, error) {
 	e, err := s.resource.Create(ctx, params)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.verifyFlags(ctx, params, e); err != nil {
-		return nil, err
-	}
-	return e, nil
+	return s.verified(ctx, params, e)
 }
 
 // Update changes the provided fields of an employee (HTTP PATCH). When
 // params set an attendance flag that the server did not apply, the other
-// fields have nevertheless been written and the error is an
-// [*UnsupportedFieldError] carrying the record.
+// fields have nevertheless been written: the record is returned together
+// with an [*UnsupportedFieldError].
 func (s *EmployeeService) Update(ctx context.Context, id int, params *EmployeeParams) (*Employee, error) {
 	e, err := s.resource.Update(ctx, id, params)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.verifyFlags(ctx, params, e); err != nil {
-		return nil, err
+	return s.verified(ctx, params, e)
+}
+
+// verified returns the written record with the verdict of verifyFlags. A
+// write the server accepted always yields the record, error or not.
+func (s *EmployeeService) verified(ctx context.Context, params *EmployeeParams, e *Employee) (*Employee, error) {
+	if verr := s.verifyFlags(ctx, params, e); verr != nil {
+		return verr.Employee, verr
 	}
 	return e, nil
 }
@@ -302,7 +316,7 @@ func flagChecks(p *EmployeeParams) []flagCheck {
 // differs (ignored by the server); the record does not carry it even on
 // the detail view (not reported by the server); or the read-back itself
 // failed, which is reported with the cause and no verdict.
-func (s *EmployeeService) verifyFlags(ctx context.Context, params *EmployeeParams, e *Employee) error {
+func (s *EmployeeService) verifyFlags(ctx context.Context, params *EmployeeParams, e *Employee) *UnsupportedFieldError {
 	checks := flagChecks(params)
 	needsFetch := false
 	for _, c := range checks {
@@ -315,9 +329,6 @@ func (s *EmployeeService) verifyFlags(ctx context.Context, params *EmployeeParam
 		}
 	}
 	if needsFetch {
-		if e.ID == 0 {
-			return &UnsupportedFieldError{Reason: VerdictNoID, Employee: e}
-		}
 		full, err := s.Get(ctx, e.ID)
 		if err != nil {
 			return &UnsupportedFieldError{Reason: VerdictUnverified, Employee: e, Cause: err}

@@ -27,6 +27,15 @@ const (
 	// password, which is how an integration account gets locked out during
 	// a password rotation. [Client.Login] is never throttled.
 	loginBackoff = time.Minute
+	// maxFreshRejections is how many login-issued tokens in a row the
+	// server may reject, with none accepted in between, before the
+	// re-login is suspended. One is tolerated so that a single transient
+	// refusal of a new token does not cost a minute of refusals; a server
+	// that refuses every new token, whatever the cause, is suspended on
+	// the second. This does not ride out a lag that hits every new token,
+	// such as a read replica behind the primary: the second token meets
+	// the same lag and is the second strike.
+	maxFreshRejections = 2
 )
 
 // Client talks to a ZKBio Time server. Create one with [New]. A Client is
@@ -42,16 +51,29 @@ type Client struct {
 	userAgent     string
 	language      string
 	logger        *slog.Logger
+	// loc is the zone the server keeps its wall-clock times in. See
+	// [WithLocation].
+	loc *time.Location
 
 	creds *credentials
 	// now is the clock behind loginBackoff; tests replace it.
 	now func() time.Time
 
-	// tokenMu guards token and the last rejected login.
-	tokenMu     sync.RWMutex
-	token       string
-	loginErr    error     // the rejection, nil after a success or SetToken
-	loginFailed time.Time // when loginErr was recorded
+	// tokenMu guards token, unproven and the last rejected login.
+	tokenMu sync.RWMutex
+	token   string
+	// unproven marks a token that [Client.Login] obtained and that no
+	// request has been accepted with yet. A server that rejects such a
+	// token is not reporting expiry: it never accepted the token at all,
+	// which is what a wrong [AuthScheme] or a revoked account looks like.
+	// Logging in again cannot help, and doing it once per request would
+	// turn every call into a password check on the server.
+	unproven bool
+	// freshRejections counts consecutive login-issued tokens the server
+	// rejected before accepting a request with any; markAccepted resets it.
+	freshRejections int
+	loginErr        error     // the rejection, nil after a success or SetToken
+	loginFailed     time.Time // when loginErr was recorded
 	// loginMu serializes automatic logins so that concurrent requests
 	// share one.
 	loginMu sync.Mutex
@@ -110,6 +132,7 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 		scheme:    AuthToken,
 		userAgent: defaultUserAgent,
 		language:  defaultLanguage,
+		loc:       time.Local,
 		now:       time.Now,
 	}
 	for _, opt := range opts {
@@ -123,8 +146,9 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 		c.pageSizeParam = c.version.pageSizeParam()
 	}
 	if c.http == nil {
+		// No Timeout here: send bounds every request through its context,
+		// which is the one mechanism and the same on every transport.
 		c.http = &http.Client{
-			Timeout: c.timeout,
 			// A followed redirect turns POST into GET and drops the body, and
 			// the response of the wrong endpoint would then be decoded without
 			// complaint. Surface the 3xx instead; request maps it to an *Error.
@@ -149,6 +173,36 @@ func (c *Client) BaseURL() string { return c.baseURL.String() }
 // Version returns the server generation the client is configured for.
 func (c *Client) Version() Version { return c.version }
 
+// Location returns the zone the client interprets the server's naive
+// timestamps in. See [WithLocation].
+func (c *Client) Location() *time.Location { return c.loc }
+
+// DateTime wraps the instant t for a request body, in the server's zone, so
+// that it encodes as the wall-clock time the server would record for it.
+// A zero t yields the zero value, which encodes as null and is omitted
+// from params.
+func (c *Client) DateTime(t time.Time) DateTime {
+	if t.IsZero() {
+		return DateTime{}
+	}
+	return NewDateTime(t.In(c.loc))
+}
+
+// Date returns the calendar date of the instant t in the server's zone,
+// which is the date the server would record for it. A zero t yields the
+// zero value, which encodes as null and is omitted from params.
+func (c *Client) Date(t time.Time) Date {
+	if t.IsZero() {
+		return Date{}
+	}
+	return NewDate(t.In(c.loc))
+}
+
+// queryConfig is what a filter needs from the client to render itself.
+func (c *Client) queryConfig() queryConfig {
+	return queryConfig{pageSizeParam: c.pageSizeParam, loc: c.loc}
+}
+
 // Token returns the access token currently in use, or "" before login.
 func (c *Client) Token() string {
 	c.tokenMu.RLock()
@@ -159,10 +213,38 @@ func (c *Client) Token() string {
 // SetToken replaces the access token in use and lifts the re-login backoff
 // that a rejected login may have set.
 func (c *Client) SetToken(token string) {
+	c.storeToken(token, false)
+}
+
+// storeToken installs a token and lifts any suspension. unproven marks a
+// token that Login obtained and the server has not accepted yet; a token
+// the caller supplies also clears the count of rejected fresh ones.
+func (c *Client) storeToken(token string, unproven bool) {
 	c.tokenMu.Lock()
 	defer c.tokenMu.Unlock()
 	c.token = token
+	c.unproven = unproven
+	if !unproven {
+		c.freshRejections = 0
+	}
 	c.loginErr = nil
+}
+
+// markAccepted records that the server accepted a request carrying token.
+// The write happens once per token; the common case is a read.
+func (c *Client) markAccepted(token string) {
+	c.tokenMu.RLock()
+	stale := (c.unproven || c.freshRejections > 0) && c.token == token
+	c.tokenMu.RUnlock()
+	if !stale {
+		return
+	}
+	c.tokenMu.Lock()
+	if c.token == token {
+		c.unproven = false
+		c.freshRejections = 0
+	}
+	c.tokenMu.Unlock()
 }
 
 // recentLoginFailure returns an error wrapping the last rejected login when
@@ -182,15 +264,26 @@ func (c *Client) recentLoginFailure(ctx context.Context) error {
 	if remaining <= 0 {
 		return nil
 	}
+	// One line per refused request belongs in the trace, not in a
+	// production log: a fleet polling through a suspension would flood it.
+	// The suspension itself was logged once, at warn, when it began.
 	c.log(ctx, "biotime: login suspended after rejection", "scheme", string(c.scheme), "retry_in", remaining)
 	return fmt.Errorf("biotime: login suspended for %s after a rejection: %w", loginBackoff, loginErr)
 }
 
-func (c *Client) recordLoginFailure(err error) {
+// recordLoginFailure suspends the automatic login and says so once, at
+// warn. When dropToken is the token in use it is discarded too, so that
+// requests in the window fail on the suspension without a round trip to
+// the server.
+func (c *Client) recordLoginFailure(ctx context.Context, err error, dropToken string) {
 	c.tokenMu.Lock()
-	defer c.tokenMu.Unlock()
+	if dropToken != "" && c.token == dropToken {
+		c.token, c.unproven = "", false
+	}
 	c.loginErr = err
 	c.loginFailed = c.now()
+	c.tokenMu.Unlock()
+	c.logAt(ctx, slog.LevelWarn, "biotime: automatic login suspended", "scheme", string(c.scheme), "for", loginBackoff)
 }
 
 // Login obtains a fresh access token with the configured credentials and
@@ -210,6 +303,13 @@ func (c *Client) recordLoginFailure(err error) {
 // device's block page, and any 5xx or transport failure suspend nothing.
 // Login itself is never suspended, and [Client.SetToken] lifts the
 // suspension.
+//
+// The same suspension applies when the server rejects two tokens in a row
+// that this method issued, before accepting a single request with either:
+// that is not expiry but a token the server never honors, as with an
+// [AuthScheme] that does not match the server, and logging in again would
+// not change it. A single such rejection is followed by one more login,
+// so that one transient refusal does not cost a minute.
 func (c *Client) Login(ctx context.Context) (string, error) {
 	if c.creds == nil {
 		return "", ErrNoCredentials
@@ -224,7 +324,7 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 		// bare 400, is not a verdict on the credentials: it is neither
 		// "unauthorized" nor a reason to suspend re-login.
 		if apiErr, ok := errors.AsType[*Error](err); ok && isLoginRejection(apiErr) {
-			c.log(ctx, "biotime: login rejected", "scheme", string(c.scheme), "status", apiErr.StatusCode)
+			c.logAt(ctx, slog.LevelWarn, "biotime: login rejected", "scheme", string(c.scheme), "status", apiErr.StatusCode)
 			apiErr.login = true
 			// The request was refused, so the error is "unauthorized" either
 			// way; but only a verdict the server itself wrote suspends the
@@ -233,7 +333,7 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 			// message-less 403 is an edge device's block page, not a
 			// rejected password.
 			if apiErr.Message != "" || len(apiErr.Fields) > 0 {
-				c.recordLoginFailure(err)
+				c.recordLoginFailure(ctx, err, "")
 			}
 		}
 		return "", err
@@ -241,7 +341,7 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 	if resp.Token == "" {
 		return "", errors.New("biotime: login response contained no token")
 	}
-	c.SetToken(resp.Token)
+	c.storeToken(resp.Token, true)
 	c.log(ctx, "biotime: logged in", "scheme", string(c.scheme))
 	return resp.Token, nil
 }
@@ -269,18 +369,37 @@ func (c *Client) ensureToken(ctx context.Context) (string, error) {
 }
 
 // refreshToken obtains a new token after the server rejected the one used
-// for a request. When another goroutine has already replaced the rejected
-// token, the replacement is returned without logging in again.
-func (c *Client) refreshToken(ctx context.Context, rejected string) (string, error) {
+// for a request; rejection is the server's answer. When another goroutine
+// has already replaced the rejected token, the replacement is returned
+// without logging in again. A rejected token that the server never
+// accepted suspends the re-login instead: see [Client.Login].
+func (c *Client) refreshToken(ctx context.Context, rejected string, rejection *Error) (string, error) {
 	if c.creds == nil {
 		return "", nil
 	}
 	c.loginMu.Lock()
 	defer c.loginMu.Unlock()
-	if t := c.Token(); t != "" && t != rejected {
+	c.tokenMu.RLock()
+	t, unproven := c.token, c.unproven
+	c.tokenMu.RUnlock()
+	if t != "" && t != rejected {
 		return t, nil
 	}
 	if err := c.recentLoginFailure(ctx); err != nil {
+		return "", err
+	}
+	if t == rejected && unproven {
+		c.tokenMu.Lock()
+		c.freshRejections++
+		strikes := c.freshRejections
+		c.tokenMu.Unlock()
+		if strikes < maxFreshRejections {
+			c.log(ctx, "biotime: fresh token rejected, re-authenticating once more", "scheme", string(c.scheme), "status", rejection.StatusCode)
+			return c.Login(ctx)
+		}
+		err := fmt.Errorf("biotime: server rejected %d tokens in a row that it just issued, check that WithAuthScheme(%q) matches the server: %w", strikes, c.scheme, rejection)
+		c.logAt(ctx, slog.LevelWarn, "biotime: fresh token rejected again", "scheme", string(c.scheme), "status", rejection.StatusCode, "rejections", strikes)
+		c.recordLoginFailure(ctx, err, rejected)
 		return "", err
 	}
 	c.log(ctx, "biotime: token rejected, re-authenticating", "scheme", string(c.scheme))
@@ -303,6 +422,17 @@ type TypedBody struct {
 	Content     any
 }
 
+// Response is the raw outcome of a request made with [Client.DoRaw].
+type Response struct {
+	// StatusCode is the HTTP status, always 2xx: anything else is
+	// returned as an [*Error] instead.
+	StatusCode int
+	// Header holds the response headers.
+	Header http.Header
+	// Body is the whole response body, capped by [WithMaxBodySize].
+	Body []byte
+}
+
 // Do performs an authenticated request against an arbitrary API path and
 // decodes the JSON response into out (which may be nil). It is the escape
 // hatch for endpoints this package does not model. path is relative to the
@@ -311,8 +441,22 @@ type TypedBody struct {
 // [json.RawMessage], which are sent unchanged. Every body is sent as
 // "application/json" unless it is wrapped in a [TypedBody], which names the
 // Content-Type.
+//
+// When out is one of the record types of this package, such as
+// [*Transaction], its timestamps are resolved in the client's zone as the
+// services do; decoded into any other type, a [DateTime] carries the
+// server's wall clock labeled UTC.
 func (c *Client) Do(ctx context.Context, method, path string, query url.Values, body, out any) error {
 	return c.request(ctx, method, path, query, body, out, true)
+}
+
+// DoRaw performs an authenticated request like [Client.Do] and returns the
+// response undecoded, for endpoints that answer with something other than
+// JSON, such as a photo or a report export, or whose status and headers
+// matter. A non-2xx response is an [*Error], as with Do.
+func (c *Client) DoRaw(ctx context.Context, method, path string, query url.Values, body any) (*Response, error) {
+	resp, _, err := c.exchange(ctx, method, path, query, body, true)
+	return resp, err
 }
 
 // Get is shorthand for [Client.Do] with the GET method and no body.
@@ -325,9 +469,36 @@ func (c *Client) Post(ctx context.Context, path string, body, out any) error {
 	return c.Do(ctx, http.MethodPost, path, nil, body, out)
 }
 
-// request executes one API call, retrying once with a fresh token when the
-// server answers 401 and credentials are available.
+// request executes one API call and decodes the JSON response into out.
 func (c *Client) request(ctx context.Context, method, path string, query url.Values, body, out any, auth bool) error {
+	resp, target, err := c.exchange(ctx, method, path, query, body, auth)
+	if err != nil {
+		return err
+	}
+	if out == nil || len(bytes.TrimSpace(resp.Body)) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(resp.Body, out); err != nil {
+		return fmt.Errorf("biotime: decoding %s %s response: %w", method, withoutQuery(target), err)
+	}
+	if env, ok := out.(envelope); ok {
+		if code := env.envelopeCode(); code != 0 {
+			e := newError(method, redactedURL(target), resp.StatusCode, resp.Body)
+			e.Code = code
+			return e
+		}
+	}
+	if l, ok := out.(localizable); ok {
+		l.localize(c.loc)
+	}
+	return nil
+}
+
+// exchange performs one API call with authentication, retrying once with a
+// fresh token when the server answers 401 and credentials are available. A
+// non-2xx answer is returned as an [*Error]; target is the address called,
+// for messages.
+func (c *Client) exchange(ctx context.Context, method, path string, query url.Values, body any, auth bool) (*Response, *url.URL, error) {
 	// Both forms are unwrapped: a *TypedBody that fell through would be
 	// JSON-encoded as the wrapper struct and sent to the server as such.
 	contentType := defaultType
@@ -336,7 +507,7 @@ func (c *Client) request(ctx context.Context, method, path string, query url.Val
 		contentType, body = tb.ContentType, tb.Content
 	case *TypedBody:
 		if tb == nil {
-			return errors.New("biotime: nil *TypedBody")
+			return nil, nil, errors.New("biotime: nil *TypedBody")
 		}
 		contentType, body = tb.ContentType, tb.Content
 	}
@@ -344,12 +515,12 @@ func (c *Client) request(ctx context.Context, method, path string, query url.Val
 		contentType = defaultType
 	}
 	if !validHeaderValue(contentType) {
-		return fmt.Errorf("biotime: invalid Content-Type %q", contentType)
+		return nil, nil, fmt.Errorf("biotime: invalid Content-Type %q", contentType)
 	}
 
 	payload, err := encodeBody(body, c.maxBody)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	target := c.baseURL.JoinPath(path)
 	if !strings.HasSuffix(target.Path, "/") {
@@ -365,44 +536,50 @@ func (c *Client) request(ctx context.Context, method, path string, query url.Val
 	if auth {
 		token, err = c.ensureToken(ctx)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
 	}
 
-	status, respBody, err := c.send(ctx, method, target, payload, contentType, token)
+	resp, err := c.send(ctx, method, target, payload, contentType, token)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	if status == http.StatusUnauthorized && auth {
-		fresh, err := c.refreshToken(ctx, token)
+	if auth && resp.StatusCode == http.StatusUnauthorized {
+		rejection := newError(method, redactedURL(target), resp.StatusCode, resp.Body)
+		fresh, err := c.refreshToken(ctx, token, rejection)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
 		if fresh != "" {
-			status, respBody, err = c.send(ctx, method, target, payload, contentType, fresh)
+			token = fresh
+			resp, err = c.send(ctx, method, target, payload, contentType, token)
 			if err != nil {
-				return err
+				return nil, nil, err
 			}
 		}
 	}
+	if auth && provesToken(resp.StatusCode) {
+		c.markAccepted(token)
+	}
 
-	if status < 200 || status >= 300 {
-		return newError(method, redactedURL(target), status, respBody)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, nil, newError(method, redactedURL(target), resp.StatusCode, resp.Body)
 	}
-	if out == nil || len(bytes.TrimSpace(respBody)) == 0 {
-		return nil
+	return resp, target, nil
+}
+
+// provesToken reports whether a response with the given status shows that
+// the application authenticated the request. A 401 is the opposite; a 407
+// is a forward proxy refusing the request before the server saw it, and a
+// gateway status is the proxy's word for a server that is down. None of
+// those proves anything about the token.
+func provesToken(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusProxyAuthRequired,
+		http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return false
 	}
-	if err := json.Unmarshal(respBody, out); err != nil {
-		return fmt.Errorf("biotime: decoding %s %s response: %w", method, withoutQuery(target), err)
-	}
-	if env, ok := out.(envelope); ok {
-		if code := env.envelopeCode(); code != 0 {
-			e := newError(method, redactedURL(target), status, respBody)
-			e.Code = code
-			return e
-		}
-	}
-	return nil
+	return true
 }
 
 // envelope is implemented by response types that carry the 9.0 code/msg
@@ -413,15 +590,21 @@ type envelope interface {
 }
 
 // send performs a single HTTP exchange and reads the whole body, up to the
-// configured size limit.
-func (c *Client) send(ctx context.Context, method string, target *url.URL, payload []byte, contentType, token string) (status int, body []byte, err error) {
+// configured size limit. The client's timeout bounds the exchange whatever
+// transport is in use; a shorter deadline on the caller's context wins.
+func (c *Client) send(ctx context.Context, method string, target *url.URL, payload []byte, contentType, token string) (*Response, error) {
+	if c.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.timeout)
+		defer cancel()
+	}
 	var reader io.Reader
 	if payload != nil {
 		reader = bytes.NewReader(payload)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, target.String(), reader)
 	if err != nil {
-		return 0, nil, fmt.Errorf("biotime: building request: %w", err)
+		return nil, fmt.Errorf("biotime: building request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", c.userAgent)
@@ -445,13 +628,13 @@ func (c *Client) send(ctx context.Context, method string, target *url.URL, paylo
 		if uerr, ok := errors.AsType[*url.Error](err); ok {
 			uerr.URL = withoutQuery(target)
 		}
-		return 0, nil, fmt.Errorf("biotime: %s %s: %w", method, withoutQuery(target), err)
+		return nil, fmt.Errorf("biotime: %s %s: %w", method, withoutQuery(target), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err = readCapped(resp.Body, c.maxBody)
+	body, err := readCapped(resp.Body, c.maxBody)
 	if err != nil {
-		return 0, nil, fmt.Errorf("biotime: reading %s %s response: %w", method, withoutQuery(target), err)
+		return nil, fmt.Errorf("biotime: reading %s %s response: %w", method, withoutQuery(target), err)
 	}
 	// The query carries filter values such as names and employee codes;
 	// the log line names the endpoint only.
@@ -462,7 +645,7 @@ func (c *Client) send(ctx context.Context, method string, target *url.URL, paylo
 		"bytes", len(body),
 		"duration", time.Since(start),
 	)
-	return resp.StatusCode, body, nil
+	return &Response{StatusCode: resp.StatusCode, Header: resp.Header, Body: body}, nil
 }
 
 // withoutQuery renders u without its query, fragment and userinfo: filter
@@ -531,11 +714,18 @@ func encodeBody(body any, maxBody int64) ([]byte, error) {
 	}
 }
 
+// log writes a debug line, the level of the request trace.
 func (c *Client) log(ctx context.Context, msg string, args ...any) {
+	c.logAt(ctx, slog.LevelDebug, msg, args...)
+}
+
+// logAt writes a line at the given level. Events an operator must see
+// without the request trace, such as a rejected login, go out as warnings.
+func (c *Client) logAt(ctx context.Context, level slog.Level, msg string, args ...any) {
 	if c.logger == nil {
 		return
 	}
-	c.logger.DebugContext(ctx, msg, args...)
+	c.logger.Log(ctx, level, msg, args...)
 }
 
 // detailPath joins a collection path with an object identifier.

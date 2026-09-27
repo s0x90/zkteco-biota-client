@@ -19,6 +19,8 @@ type Area struct {
 	ParentAreaName string    `json:"parent_area_name,omitzero"`
 }
 
+func (a *Area) recordID() int { return a.ID }
+
 // AreaFilter selects areas in [AreaService.List].
 type AreaFilter struct {
 	ListOptions
@@ -30,11 +32,11 @@ type AreaFilter struct {
 	Params map[string]string
 }
 
-func (f *AreaFilter) values(pageSizeParam string) url.Values {
+func (f *AreaFilter) values(cfg queryConfig) url.Values {
 	if f == nil {
 		return url.Values{}
 	}
-	return buildQuery(f.ListOptions, f.Params, pageSizeParam, func(q query) {
+	return buildQuery(f.ListOptions, f.Params, cfg, func(q query) {
 		q.str("area_code", f.AreaCode)
 		q.str("area_name", f.AreaName)
 		q.int("parent_area", f.ParentArea)
